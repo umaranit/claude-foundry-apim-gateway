@@ -117,6 +117,9 @@ Select **Test connection** and sign in in the browser. Expected: `Connected. You
 
 ## Troubleshooting
 
+Gateway denials include the header `x-claude-denied-by`, which names the reason.
+
+
 | What you see | Cause | What to do |
 |---|---|---|
 | "Need admin approval – Microsoft Azure CLI" | Azure CLI is not yet allowed to request gateway tokens in your organization | Ask your administrator (operations guide: "Allow Azure CLI to request gateway tokens") |
@@ -124,6 +127,10 @@ Select **Test connection** and sign in in the browser. Expected: `Connected. You
 | Desktop: `Provider returned error: invalid_client` or "Authentication failed" | Wrong Scopes, Client ID or Issuer URL | Copy the values again from the file; paste the **whole** scopes value |
 | No token / sign-in expired | Azure CLI sign-in expired | Run the script again with `-Login` / `--login` |
 | 401 | No `Claude.User` role, or wrong token type | Ask your administrator to check your team membership (new roles can take a few minutes); in Desktop select **Access token** |
-| 403 or 429 | Suspended, budget used up, or rate limit reached | Ask your administrator |
+| 403 `identity` | You are not in exactly one Claude team | Ask your administrator to add you to one team (and remove you from any other); then sign in again |
+| 403 `team-model-policy` | The model is not allowed for your team | Use an allowed model, or ask your administrator |
+| 403 `user-budget` or `team-budget` | Your or your team's monthly budget is used up | Ask your administrator |
+| 403 `admin` | Your access is suspended | Ask your administrator |
+| 429 (`user-token-limit` or `team-token-limit`) | Rate or token limit reached | Wait and retry, or ask your administrator |
 | Model not found | Model names differ from the deployments | Ask your administrator for a fresh configuration file |
 | Settings ignored | Organization-managed or project settings take priority | Check those settings, or ask your administrator |

@@ -76,11 +76,21 @@ jq -e -f admin/validate-config.jq admin/setup.local.json > /dev/null && echo "Co
 ### Remove a member or a team
 The scripts **never** delete groups or remove members. Remove the user from the team's Entra group (Microsoft Entra ID > Groups), and remove them from `members` in the configuration so the check stays clean. To retire a team, remove its group's members, then delete the group and remove the team from the configuration.
 
-### Give access to a single user without a team
-Microsoft Entra ID > **Enterprise applications** > the gateway app > **Users and groups** > **Add user/group**: assign `Claude.User`, and one tier role (`Claude.Tier.Pro` or `Claude.Tier.Basic`; `Claude.Tier.Lite` exists only when a team uses the lite tier).
+### Move a user to another team
+1. Remove the user from the **old** team's group (Microsoft Entra ID > Groups) and from its `members` list in the configuration.
+2. Add the user to the new team's `members` list and run the governance script with `--yes` / `-Yes`.
+3. The user signs in again to get a fresh token.
+
+Until step 1 is done, the user holds two team roles; in `enforce` mode they are blocked (403 `identity`).
+
+### Give access to a single user
+In `enforce` mode, every user must be in exactly one team. Add the user to an existing team, or create a team with one member.
+In `observe` or `off` mode only, you can instead assign roles directly: Microsoft Entra ID > **Enterprise applications** > the gateway app > **Users and groups** > **Add user/group**: assign `Claude.User` and one tier role (`Claude.Tier.Pro` or `Claude.Tier.Basic`; `Claude.Tier.Lite` exists only when a team uses the lite tier).
 
 ### Suspend a user
-Assign the `Claude.Suspended` role to the user on the gateway app (as above). Suspended users receive an error from the gateway. Remove the role to restore access.
+Assign the `Claude.Suspended` role to the user on the gateway app (Enterprise applications > the gateway app > Users and groups). The user is blocked (403 `admin`) once they get a fresh token; an existing token keeps working until it expires (up to about an hour). Remove the role to restore access.
+
+Role changes of any kind (team, tier, suspension) take effect only in a newly issued token.
 
 ---
 
@@ -90,10 +100,33 @@ Assign the `Claude.Suspended` role to the user on the gateway app (as above). Su
 |---|---|---|
 | Per-user tiers | `tiersConfig` (exactly `pro`, `basic`, `lite`) | `tpm` (tokens per minute), `tokenQuota`, `costQuota` (USD) |
 | Team profiles | `teamGovernance.profiles` | `tpm`, `tokenQuota`, `costQuota` (USD) |
-| Team mode | `teamGovernance.mode` | `observe` (record only) or `enforce` |
 | Model prices | `snippets/15-load-pricing.py` (`PRICES`) | Price per token type and model |
 
 After a change, validate the configuration and re-run the full deployment with the same names.
+
+### Team governance mode
+Set in `teamGovernance.mode`. The default is `enforce`.
+
+| Control | `off` | `observe` | `enforce` (default) |
+|---|---|---|---|
+| Suspended users blocked (`Claude.Suspended`) | Yes | Yes | Yes |
+| Per-user budget and token limits (tier) | Yes | Yes | Yes |
+| Team budget and team token limits (profile) | No | Yes | Yes |
+| Users with no team, more than one team, or a mismatched profile role are blocked | No | No (logged only) | **Yes** |
+| Team model allow-list (`allowedModels`) | No | No | **Yes** |
+
+**Switch mode:** change `teamGovernance.mode`, validate the configuration, and re-run the full deployment with the same names. To roll back from `enforce`, set `observe`; individual controls and team budgets stay active.
+
+### What users see when they are blocked
+Every denial carries the header `x-claude-denied-by`:
+
+| Status | `x-claude-denied-by` | Reason |
+|---|---|---|
+| 403 | `admin` | User has `Claude.Suspended` |
+| 403 | `identity` | `enforce` mode: user has no team, more than one team, or a team/profile mismatch |
+| 403 | `team-model-policy` | `enforce` mode: model is not in the team's `allowedModels` |
+| 403 | `user-budget` / `team-budget` | Monthly user or team dollar budget used up |
+| 429 or 403 | `user-token-limit` / `team-token-limit` | Rate (tokens per minute) or monthly token quota reached |
 
 Budget accounting is asynchronous and fail-open: usage is counted shortly after each request, so a user can go slightly over a limit before it is enforced, and if the budget service is unavailable, requests are allowed. Cache writes are not counted.
 
@@ -137,7 +170,7 @@ Some dashboards use the hourly summary table; to create it, also set `options.su
    ```bash
    az group delete -n <resource-group> --yes --no-wait
    ```
-2. In the workspace's resource group, delete the pricing data collection rule (`dcr-claudeprice-...`) and the workbooks if they are no longer needed.
+2. If the Log Analytics workspace is in a **different** resource group, also delete the pricing data collection rule (`dcr-claudeprice-...`) and the workbooks there (and the workspace, if it was created only for the gateway). If the workspace is in the gateway resource group, step 1 removes it, including its usage data.
 3. Delete the Entra objects: the gateway app, "Claude Desktop - &lt;APIM name&gt;", "Claude Budget API - &lt;prefix&gt;", and the "Claude Team - ..." groups:
    ```bash
    az ad app delete --id <app-id>
@@ -160,7 +193,7 @@ Some dashboards use the hourly summary table; to create it, also set `options.su
 | `pythonExecutable ... is not a working Python 3` (PowerShell) | Microsoft Store placeholder | Install Python and use the venv path |
 | `Set models.<family>: no unique deployment` | A model is missing or deployed twice | Exactly one deployment each of Opus, Sonnet, Haiku |
 | `The extension quota is not installed` | Missing Azure CLI extension | `az extension add -n quota` |
-| `MissingRegistrationForResourceProvider` | Provider not registered | Register the providers (deployment guide, B3) |
+| `MissingRegistrationForResourceProvider` | Provider not registered | Register the providers (deployment guide, B4) |
 | `EP1 limit must support at least two always-ready instances` | Not enough EP1 quota | Request quota or choose another region |
 | `Review PRICES ... pricesReviewed=true` | Safety stop | Review the prices, then set `options.pricesReviewed` to `true` |
 | `Wrong Azure tenant` | Azure CLI signed in to another tenant | `az login --tenant <tenant-id>` |
@@ -170,3 +203,5 @@ Some dashboards use the hourly summary table; to create it, also set `options.su
 | "Need admin approval – Microsoft Azure CLI" (developers) | Azure CLI not authorized on the gateway API | Section 1 |
 | Desktop `invalid_client` | Wrong Scopes, Client ID or Issuer URL in Desktop | Developer guide, Part 2 |
 | Gateway returns 401 to a signed-in user | No `Claude.User` role, or wrong token type | Check team membership and role assignments; Desktop must use **Access token** |
+| 403 `identity` for a user who should have access | `enforce` mode and the user is in no team, or in two teams | Put the user in exactly one team; they sign in again |
+| 403 `team-model-policy` | Model not in the team's `allowedModels` | Add the model to the team, or use an allowed model |

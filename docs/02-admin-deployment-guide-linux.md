@@ -51,14 +51,27 @@ az account show --query "{tenant:tenantId, subscription:name}" -o table
 ```
 If Conditional Access requires a managed device, use the browser sign-in (not `--use-device-code`). On WSL, if the browser does not open, copy the sign-in link from the terminal into your Windows browser.
 
-### B2. Check the Foundry model deployments
+### B2. Create the resource group and Log Analytics workspace
+Skip this step if they already exist (checklist items 5 and 6).
+```bash
+RG="<resource-group>"; REGION="<region>"; WS="<workspace-name>"
+az group create -n "$RG" -l "$REGION" -o table
+az monitor log-analytics workspace create -g "$RG" -n "$WS" -l "$REGION" --query id -o tsv
+```
+The last command prints the **workspace resource ID**. Keep it: preflight asks for it. To show it again later:
+```bash
+az monitor log-analytics workspace show -g "$RG" -n "$WS" --query id -o tsv
+```
+Use the same region for the workspace and the gateway unless your organization requires otherwise.
+
+### B3. Check the Foundry model deployments
 ```bash
 az cognitiveservices account deployment list -g <foundry-rg> -n <foundry-name> \
   --query "[].{deployment:name, model:properties.model.name}" -o table
 ```
 There must be **exactly one** deployment of each: Opus, Sonnet and Haiku. Deployment names can be anything; the setup detects them.
 
-### B3. Register resource providers
+### B4. Register resource providers
 ```bash
 PROVIDERS="Microsoft.Quota Microsoft.ApiManagement Microsoft.Web Microsoft.Cache Microsoft.DocumentDB Microsoft.EventHub Microsoft.Insights Microsoft.OperationalInsights Microsoft.Storage Microsoft.Dashboard"
 for p in $PROVIDERS; do az provider register --namespace $p; done
@@ -66,7 +79,7 @@ for p in $PROVIDERS; do echo "$p: $(az provider show -n $p --query registrationS
 ```
 Repeat the second loop until every provider shows `Registered`.
 
-### B4. Check EP1 quota
+### B5. Check EP1 quota
 ```bash
 SCOPE="/subscriptions/<subscription-id>/providers/Microsoft.Web/locations/<region>"
 az quota show --resource-name EP1 --scope "$SCOPE" --query "properties.limit.value" -o tsv
@@ -105,7 +118,7 @@ The output lists the roles `Claude.User`, `Claude.Tier.Pro`, `Claude.Tier.Basic`
 | Log Analytics workspace resource ID | The full resource ID |
 | Foundry resource name | The Foundry resource |
 | Resource name prefix | 3–11 lowercase letters or digits |
-| Configure team governance now? | `yes`, then the team details from the checklist |
+| Configure team governance now? | `yes`, then the team details from the checklist. The team governance mode is `enforce` by default (see C3/C4 to change it). |
 
 Team member sign-in names are entered comma-separated, without spaces.
 
@@ -124,6 +137,12 @@ Set the Python path and confirm that the prices are reviewed:
 jq --arg p "$HOME/claude-venv/bin/python" '.pythonExecutable=$p | .options.pricesReviewed=true' \
   admin/setup.local.json > /tmp/setup.json && mv /tmp/setup.json admin/setup.local.json
 ```
+**Team governance mode.** The default is `enforce`. To start in `observe` instead:
+```bash
+jq '.teamGovernance.mode="observe"' admin/setup.local.json > /tmp/setup.json && mv /tmp/setup.json admin/setup.local.json
+```
+In `enforce` mode every user must be in exactly one team, and each team can use only its allowed models.
+
 **Optional: Grafana.** Use the admin's **user object ID in this tenant**:
 ```bash
 jq --arg n "<prefix>-grafana" --arg l "<region>" --arg a "<admin-user-object-id>" \
@@ -140,7 +159,7 @@ Run inside `tmux` so a dropped connection does not stop the deployment. Keep the
 ```bash
 tmux new -s claude
 source ~/claude-venv/bin/activate
-cd ~/claude-on-azure-sombaner
+cd ~/claude-foundry-apim-gateway
 ./admin/claude-gateway-setup.sh --config admin/setup.local.json --non-interactive --yes \
   --debug --log-file logs/claude-gateway-setup.log
 ```
@@ -174,10 +193,30 @@ bash developer/setup-claude-workstation.sh --config developer/claude-client-conf
 Expected: `Smoke tests passed: unauthenticated 401; authenticated inference 200.`
 `--test-only` changes no settings and makes one small billable request.
 
-### D4. Usage tracking
+### D4. Team governance checks (enforce mode)
+Run these with real users after the smoke test (each makes at most one small billable request):
+
+| Test | Expected |
+|---|---|
+| Team member calls an allowed model | Success (200) |
+| Team member calls a model **not** in the team's `allowedModels` | 403 with header `x-claude-denied-by: team-model-policy` |
+| User with `Claude.User` but in no team | 403 with header `x-claude-denied-by: identity` |
+
+To see the denial reason, call the gateway with a token (replace the model name):
+```bash
+CFG=developer/claude-client-configuration.json
+RES=$(jq -r '.gatewaySso.scopes' $CFG | tr ' ' '\n' | grep '^api://' | sed 's#/[^/]*$##')
+TOK=$(az account get-access-token --resource "$RES" --query accessToken -o tsv)
+curl -s -o /dev/null -D - "$(jq -r .gatewayUrl $CFG)/v1/messages" \
+  -H "content-type: application/json" -H "anthropic-version: 2023-06-01" -H "x-api-key: $TOK" -H "Authorization: Bearer unused" \
+  -d '{"model":"<model-deployment-name>","max_tokens":16,"messages":[{"role":"user","content":"Reply with READY"}]}' \
+  | grep -i -E "^HTTP|x-claude-denied-by"
+```
+
+### D5. Usage tracking
 After 5–15 minutes, open the Log Analytics workspace > **Workbooks** > **Claude team governance**. The test calls appear under the team and the user, with tokens and estimated cost.
 
-### D5. Hand over to developers
+### D6. Hand over to developers
 Give developers:
 - `developer/claude-client-configuration.json` (contains no secrets)
 - `developer/setup-claude-workstation.sh` and `developer/setup-claude-workstation.ps1`

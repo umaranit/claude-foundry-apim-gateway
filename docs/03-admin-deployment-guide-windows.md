@@ -57,13 +57,26 @@ az account set --subscription <subscription-id>
 az account show --query "{tenant:tenantId, subscription:name}" -o table
 ```
 
-### B2. Check the Foundry model deployments
+### B2. Create the resource group and Log Analytics workspace
+Skip this step if they already exist (checklist items 5 and 6).
+```powershell
+$Rg = "<resource-group>"; $Region = "<region>"; $Ws = "<workspace-name>"
+az group create -n $Rg -l $Region -o table
+az monitor log-analytics workspace create -g $Rg -n $Ws -l $Region --query id -o tsv
+```
+The last command prints the **workspace resource ID**. Keep it: preflight asks for it. To show it again later:
+```powershell
+az monitor log-analytics workspace show -g $Rg -n $Ws --query id -o tsv
+```
+Use the same region for the workspace and the gateway unless your organization requires otherwise.
+
+### B3. Check the Foundry model deployments
 ```powershell
 az cognitiveservices account deployment list -g <foundry-rg> -n <foundry-name> --query "[].{deployment:name, model:properties.model.name}" -o table
 ```
 There must be **exactly one** deployment of each: Opus, Sonnet and Haiku.
 
-### B3. Register resource providers
+### B4. Register resource providers
 ```powershell
 $Providers = 'Microsoft.Quota','Microsoft.ApiManagement','Microsoft.Web','Microsoft.Cache','Microsoft.DocumentDB','Microsoft.EventHub','Microsoft.Insights','Microsoft.OperationalInsights','Microsoft.Storage','Microsoft.Dashboard'
 foreach ($p in $Providers) { az provider register --namespace $p }
@@ -71,7 +84,7 @@ foreach ($p in $Providers) { "{0,-32} {1}" -f $p, (az provider show -n $p --quer
 ```
 Repeat the second loop until every provider shows `Registered`.
 
-### B4. Check EP1 quota
+### B5. Check EP1 quota
 ```powershell
 $Scope = "/subscriptions/<subscription-id>/providers/Microsoft.Web/locations/<region>"
 az quota show --resource-name EP1 --scope $Scope --query "properties.limit.value" -o tsv
@@ -117,7 +130,7 @@ Expected: `DRY RUN: configuration validated.`
 | Foundry resource name | The Foundry resource |
 | Resource name prefix | 3–11 lowercase letters or digits |
 | Python executable | `C:\Users\<you>\claude-venv-win\Scripts\python.exe` |
-| Configure team governance now? | `yes`, then the team details from the checklist |
+| Configure team governance now? | `yes`, then the team details from the checklist. The team governance mode is `enforce` by default (see C3/C4 to change it). |
 
 Team member sign-in names are entered comma-separated, without spaces. If an answer has the wrong format (for example the prefix or the workspace ID), the script asks again.
 
@@ -137,6 +150,13 @@ Confirm that the prices are reviewed:
 jq '.options.pricesReviewed=true' admin\setup.local.json | Set-Content admin\setup.tmp.json
 Move-Item -Force admin\setup.tmp.json admin\setup.local.json
 ```
+**Team governance mode.** The default is `enforce`. To start in `observe` instead:
+```powershell
+jq '.teamGovernance.mode="observe"' admin\setup.local.json | Set-Content admin\setup.tmp.json
+Move-Item -Force admin\setup.tmp.json admin\setup.local.json
+```
+In `enforce` mode every user must be in exactly one team, and each team can use only its allowed models.
+
 **Optional: Grafana.** Use the admin's **user object ID in this tenant**:
 ```powershell
 jq --arg n "<prefix>-grafana" --arg l "<region>" --arg a "<admin-user-object-id>" '.options.grafana=true | .grafanaName=$n | .grafanaLocation=$l | .grafanaAdminPrincipalId=$a' admin\setup.local.json | Set-Content admin\setup.tmp.json
@@ -184,10 +204,29 @@ Use an account that is in a team (it then has the `Claude.User` role):
 Expected: `Smoke tests passed: unauthenticated 401; authenticated inference 200.`
 `-TestOnly` changes no settings and makes one small billable request. Afterwards, run `az account set --subscription <subscription-id>` if later commands use the wrong subscription.
 
-### D4. Usage tracking
+### D4. Team governance checks (enforce mode)
+Run these with real users after the smoke test (each makes at most one small billable request):
+
+| Test | Expected |
+|---|---|
+| Team member calls an allowed model | Success (200) |
+| Team member calls a model **not** in the team's `allowedModels` | 403 with header `x-claude-denied-by: team-model-policy` |
+| User with `Claude.User` but in no team | 403 with header `x-claude-denied-by: identity` |
+
+To see the denial reason in PowerShell, call the gateway with a token (replace the model name):
+```powershell
+$cfg = Get-Content -Raw developer\claude-client-configuration.json | ConvertFrom-Json
+$res = ($cfg.gatewaySso.scopes -split ' ' | Where-Object { $_ -like 'api://*' }) -replace '/[^/]+$',''
+$tok = az account get-access-token --resource $res --query accessToken -o tsv
+$body = @{ model = '<model-deployment-name>'; max_tokens = 16; messages = @(@{ role = 'user'; content = 'Reply with READY' }) } | ConvertTo-Json -Depth 5
+$r = Invoke-WebRequest -Uri "$($cfg.gatewayUrl)/v1/messages" -Method Post -ContentType 'application/json' -Headers @{ 'anthropic-version' = '2023-06-01'; 'x-api-key' = $tok; Authorization = 'Bearer unused' } -Body $body -SkipHttpErrorCheck
+$r.StatusCode; $r.Headers['x-claude-denied-by']
+```
+
+### D5. Usage tracking
 After 5–15 minutes, open the Log Analytics workspace > **Workbooks** > **Claude team governance**. The test calls appear under the team and the user, with tokens and estimated cost.
 
-### D5. Hand over to developers
+### D6. Hand over to developers
 Give developers:
 - `developer\claude-client-configuration.json` (contains no secrets)
 - `developer\setup-claude-workstation.ps1` and `developer\setup-claude-workstation.sh`

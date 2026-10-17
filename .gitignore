@@ -20,3 +20,6 @@ admin/setup.tmp.json
 developer/claude-client-configuration.json
 logs/
 admin-backup/
+
+.azure/
+~$*
