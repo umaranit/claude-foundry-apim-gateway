@@ -1,0 +1,1588 @@
+{
+  "title": "Claude usage \u2014 gateway view",
+  "uid": "claude-gateway-usage",
+  "tags": [
+    "claude",
+    "apim",
+    "foundry"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 2,
+  "refresh": "5m",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Now",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "title": "Total tokens",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL\n    | summarize arg_max(TimeGenerated, *) by Model\n    | project Model, InPer1K = InputTokensPrice, OutPer1K = OutputTokensPrice;\nlet gwBase = ApiManagementGatewayLogs\n    | where $__timeFilter(TimeGenerated)\n    | where Url has \"/anthropic\"\n    | extend OidReq  = tostring(BackendRequestHeaders[\"x-caller-oid\"]),\n             OidResp = tostring(ResponseHeaders[\"x-caller-oid\"]),\n             RawUpn  = tostring(BackendRequestHeaders[\"x-caller-upn\"]),\n             TierReq = tostring(BackendRequestHeaders[\"x-caller-tier\"]),\n             TierResp= tostring(ResponseHeaders[\"x-caller-tier\"]),\n             DeniedBy= tostring(ResponseHeaders[\"x-claude-denied-by\"]),\n             UA      = tostring(RequestHeaders[\"User-Agent\"])\n    | extend Oid = iff(isempty(OidReq), OidResp, OidReq)\n    | extend Tier = iff(isnotempty(TierReq), TierReq, iff(isnotempty(TierResp), TierResp, \"unknown\"))\n    | extend Client = case(UA has \"claude-cli\", \"Claude Code\",\n                           UA has \"Electron\" and UA has \"Claude/\", \"Claude Desktop\",\n                           UA startswith \"Bun/\", \"Claude Desktop\",\n                           isempty(UA), \"Unknown\",\n                           \"Other\");\nlet ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, RawUpn) by Oid | project Oid, KnownUpn = RawUpn;\nlet gw = gwBase\n    | join kind=leftouter ids on Oid\n    | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, \"anonymous\")\n    | project CorrelationId, TimeGenerated, ResponseCode, Method, Url, BackendTime, TotalTime, User, Oid, Client, UA, Tier, DeniedBy;\nlet llm = ApiManagementGatewayLlmLog\n    | where isnotempty(RequestId)\n    | where $__timeFilter(TimeGenerated)\n    | extend Model = iff(isempty(ModelName), \"\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\nlet usage = gw\n    | join kind=leftouter (llm) on CorrelationId\n    | where isnotempty(RequestId) or ResponseCode >= 400\n    | extend IsInference = isnotempty(RequestId)\n    | lookup kind=leftouter rates on Model\n    | extend EstCost = (PromptTokens * coalesce(InPer1K, 0.0)\n                     + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0;usage | where '$client' == 'All' or Client == '$client'\n| where '$tier' == 'All' or Tier == '$tier' | summarize Value = sum(TotalTokens)",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "title": "Requests",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 5,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL\n    | summarize arg_max(TimeGenerated, *) by Model\n    | project Model, InPer1K = InputTokensPrice, OutPer1K = OutputTokensPrice;\nlet gwBase = ApiManagementGatewayLogs\n    | where $__timeFilter(TimeGenerated)\n    | where Url has \"/anthropic\"\n    | extend OidReq  = tostring(BackendRequestHeaders[\"x-caller-oid\"]),\n             OidResp = tostring(ResponseHeaders[\"x-caller-oid\"]),\n             RawUpn  = tostring(BackendRequestHeaders[\"x-caller-upn\"]),\n             TierReq = tostring(BackendRequestHeaders[\"x-caller-tier\"]),\n             TierResp= tostring(ResponseHeaders[\"x-caller-tier\"]),\n             DeniedBy= tostring(ResponseHeaders[\"x-claude-denied-by\"]),\n             UA      = tostring(RequestHeaders[\"User-Agent\"])\n    | extend Oid = iff(isempty(OidReq), OidResp, OidReq)\n    | extend Tier = iff(isnotempty(TierReq), TierReq, iff(isnotempty(TierResp), TierResp, \"unknown\"))\n    | extend Client = case(UA has \"claude-cli\", \"Claude Code\",\n                           UA has \"Electron\" and UA has \"Claude/\", \"Claude Desktop\",\n                           UA startswith \"Bun/\", \"Claude Desktop\",\n                           isempty(UA), \"Unknown\",\n                           \"Other\");\nlet ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, RawUpn) by Oid | project Oid, KnownUpn = RawUpn;\nlet gw = gwBase\n    | join kind=leftouter ids on Oid\n    | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, \"anonymous\")\n    | project CorrelationId, TimeGenerated, ResponseCode, Method, Url, BackendTime, TotalTime, User, Oid, Client, UA, Tier, DeniedBy;\nlet llm = ApiManagementGatewayLlmLog\n    | where isnotempty(RequestId)\n    | where $__timeFilter(TimeGenerated)\n    | extend Model = iff(isempty(ModelName), \"\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\nlet usage = gw\n    | join kind=leftouter (llm) on CorrelationId\n    | where isnotempty(RequestId) or ResponseCode >= 400\n    | extend IsInference = isnotempty(RequestId)\n    | lookup kind=leftouter rates on Model\n    | extend EstCost = (PromptTokens * coalesce(InPer1K, 0.0)\n                     + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0;usage | where '$client' == 'All' or Client == '$client'\n| where '$tier' == 'All' or Tier == '$tier' | summarize Value = count()",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "title": "Active developers",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 9,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL\n    | summarize arg_max(TimeGenerated, *) by Model\n    | project Model, InPer1K = InputTokensPrice, OutPer1K = OutputTokensPrice;\nlet gwBase = ApiManagementGatewayLogs\n    | where $__timeFilter(TimeGenerated)\n    | where Url has \"/anthropic\"\n    | extend OidReq  = tostring(BackendRequestHeaders[\"x-caller-oid\"]),\n             OidResp = tostring(ResponseHeaders[\"x-caller-oid\"]),\n             RawUpn  = tostring(BackendRequestHeaders[\"x-caller-upn\"]),\n             TierReq = tostring(BackendRequestHeaders[\"x-caller-tier\"]),\n             TierResp= tostring(ResponseHeaders[\"x-caller-tier\"]),\n             DeniedBy= tostring(ResponseHeaders[\"x-claude-denied-by\"]),\n             UA      = tostring(RequestHeaders[\"User-Agent\"])\n    | extend Oid = iff(isempty(OidReq), OidResp, OidReq)\n    | extend Tier = iff(isnotempty(TierReq), TierReq, iff(isnotempty(TierResp), TierResp, \"unknown\"))\n    | extend Client = case(UA has \"claude-cli\", \"Claude Code\",\n                           UA has \"Electron\" and UA has \"Claude/\", \"Claude Desktop\",\n                           UA startswith \"Bun/\", \"Claude Desktop\",\n                           isempty(UA), \"Unknown\",\n                           \"Other\");\nlet ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, RawUpn) by Oid | project Oid, KnownUpn = RawUpn;\nlet gw = gwBase\n    | join kind=leftouter ids on Oid\n    | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, \"anonymous\")\n    | project CorrelationId, TimeGenerated, ResponseCode, Method, Url, BackendTime, TotalTime, User, Oid, Client, UA, Tier, DeniedBy;\nlet llm = ApiManagementGatewayLlmLog\n    | where isnotempty(RequestId)\n    | where $__timeFilter(TimeGenerated)\n    | extend Model = iff(isempty(ModelName), \"\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\nlet usage = gw\n    | join kind=leftouter (llm) on CorrelationId\n    | where isnotempty(RequestId) or ResponseCode >= 400\n    | extend IsInference = isnotempty(RequestId)\n    | lookup kind=leftouter rates on Model\n    | extend EstCost = (PromptTokens * coalesce(InPer1K, 0.0)\n                     + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0;usage | where '$client' == 'All' or Client == '$client'\n| where '$tier' == 'All' or Tier == '$tier' | summarize Value = dcount(Oid)",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 5,
+      "title": "Throttle events",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 13,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL\n    | summarize arg_max(TimeGenerated, *) by Model\n    | project Model, InPer1K = InputTokensPrice, OutPer1K = OutputTokensPrice;\nlet gwBase = ApiManagementGatewayLogs\n    | where $__timeFilter(TimeGenerated)\n    | where Url has \"/anthropic\"\n    | extend OidReq  = tostring(BackendRequestHeaders[\"x-caller-oid\"]),\n             OidResp = tostring(ResponseHeaders[\"x-caller-oid\"]),\n             RawUpn  = tostring(BackendRequestHeaders[\"x-caller-upn\"]),\n             TierReq = tostring(BackendRequestHeaders[\"x-caller-tier\"]),\n             TierResp= tostring(ResponseHeaders[\"x-caller-tier\"]),\n             DeniedBy= tostring(ResponseHeaders[\"x-claude-denied-by\"]),\n             UA      = tostring(RequestHeaders[\"User-Agent\"])\n    | extend Oid = iff(isempty(OidReq), OidResp, OidReq)\n    | extend Tier = iff(isnotempty(TierReq), TierReq, iff(isnotempty(TierResp), TierResp, \"unknown\"))\n    | extend Client = case(UA has \"claude-cli\", \"Claude Code\",\n                           UA has \"Electron\" and UA has \"Claude/\", \"Claude Desktop\",\n                           UA startswith \"Bun/\", \"Claude Desktop\",\n                           isempty(UA), \"Unknown\",\n                           \"Other\");\nlet ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, RawUpn) by Oid | project Oid, KnownUpn = RawUpn;\nlet gw = gwBase\n    | join kind=leftouter ids on Oid\n    | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, \"anonymous\")\n    | project CorrelationId, TimeGenerated, ResponseCode, Method, Url, BackendTime, TotalTime, User, Oid, Client, UA, Tier, DeniedBy;\nlet llm = ApiManagementGatewayLlmLog\n    | where isnotempty(RequestId)\n    | where $__timeFilter(TimeGenerated)\n    | extend Model = iff(isempty(ModelName), \"\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\nlet usage = gw\n    | join kind=leftouter (llm) on CorrelationId\n    | where isnotempty(RequestId) or ResponseCode >= 400\n    | extend IsInference = isnotempty(RequestId)\n    | lookup kind=leftouter rates on Model\n    | extend EstCost = (PromptTokens * coalesce(InPer1K, 0.0)\n                     + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0;usage | where '$client' == 'All' or Client == '$client'\n| where '$tier' == 'All' or Tier == '$tier' | summarize Value = countif(ResponseCode in (429, 403))",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 6,
+      "title": "APIM stream flag (unreliable)",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 17,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL\n    | summarize arg_max(TimeGenerated, *) by Model\n    | project Model, InPer1K = InputTokensPrice, OutPer1K = OutputTokensPrice;\nlet gwBase = ApiManagementGatewayLogs\n    | where $__timeFilter(TimeGenerated)\n    | where Url has \"/anthropic\"\n    | extend OidReq  = tostring(BackendRequestHeaders[\"x-caller-oid\"]),\n             OidResp = tostring(ResponseHeaders[\"x-caller-oid\"]),\n             RawUpn  = tostring(BackendRequestHeaders[\"x-caller-upn\"]),\n             TierReq = tostring(BackendRequestHeaders[\"x-caller-tier\"]),\n             TierResp= tostring(ResponseHeaders[\"x-caller-tier\"]),\n             DeniedBy= tostring(ResponseHeaders[\"x-claude-denied-by\"]),\n             UA      = tostring(RequestHeaders[\"User-Agent\"])\n    | extend Oid = iff(isempty(OidReq), OidResp, OidReq)\n    | extend Tier = iff(isnotempty(TierReq), TierReq, iff(isnotempty(TierResp), TierResp, \"unknown\"))\n    | extend Client = case(UA has \"claude-cli\", \"Claude Code\",\n                           UA has \"Electron\" and UA has \"Claude/\", \"Claude Desktop\",\n                           UA startswith \"Bun/\", \"Claude Desktop\",\n                           isempty(UA), \"Unknown\",\n                           \"Other\");\nlet ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, RawUpn) by Oid | project Oid, KnownUpn = RawUpn;\nlet gw = gwBase\n    | join kind=leftouter ids on Oid\n    | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, \"anonymous\")\n    | project CorrelationId, TimeGenerated, ResponseCode, Method, Url, BackendTime, TotalTime, User, Oid, Client, UA, Tier, DeniedBy;\nlet llm = ApiManagementGatewayLlmLog\n    | where isnotempty(RequestId)\n    | where $__timeFilter(TimeGenerated)\n    | extend Model = iff(isempty(ModelName), \"\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\nlet usage = gw\n    | join kind=leftouter (llm) on CorrelationId\n    | where isnotempty(RequestId) or ResponseCode >= 400\n    | extend IsInference = isnotempty(RequestId)\n    | lookup kind=leftouter rates on Model\n    | extend EstCost = (PromptTokens * coalesce(InPer1K, 0.0)\n                     + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0;usage | where '$client' == 'All' or Client == '$client'\n| where '$tier' == 'All' or Tier == '$tier' | where IsInference | summarize Value = round(100.0 * countif(IsStreamCompletion == 1) / count(), 1)",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "description": "IsStreamCompletion can be false for streamed Claude requests. This shows the diagnostic flag, not actual streaming share."
+    },
+    {
+      "id": 7,
+      "title": "Cost billed (excl. cache writes)",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL\n    | summarize arg_max(TimeGenerated, *) by Model\n    | project Model, InPer1K = InputTokensPrice, OutPer1K = OutputTokensPrice;\nlet gwBase = ApiManagementGatewayLogs\n    | where $__timeFilter(TimeGenerated)\n    | where Url has \"/anthropic\"\n    | extend OidReq  = tostring(BackendRequestHeaders[\"x-caller-oid\"]),\n             OidResp = tostring(ResponseHeaders[\"x-caller-oid\"]),\n             RawUpn  = tostring(BackendRequestHeaders[\"x-caller-upn\"]),\n             TierReq = tostring(BackendRequestHeaders[\"x-caller-tier\"]),\n             TierResp= tostring(ResponseHeaders[\"x-caller-tier\"]),\n             DeniedBy= tostring(ResponseHeaders[\"x-claude-denied-by\"]),\n             UA      = tostring(RequestHeaders[\"User-Agent\"])\n    | extend Oid = iff(isempty(OidReq), OidResp, OidReq)\n    | extend Tier = iff(isnotempty(TierReq), TierReq, iff(isnotempty(TierResp), TierResp, \"unknown\"))\n    | extend Client = case(UA has \"claude-cli\", \"Claude Code\",\n                           UA has \"Electron\" and UA has \"Claude/\", \"Claude Desktop\",\n                           UA startswith \"Bun/\", \"Claude Desktop\",\n                           isempty(UA), \"Unknown\",\n                           \"Other\");\nlet ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, RawUpn) by Oid | project Oid, KnownUpn = RawUpn;\nlet gw = gwBase\n    | join kind=leftouter ids on Oid\n    | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, \"anonymous\")\n    | project CorrelationId, TimeGenerated, ResponseCode, Method, Url, BackendTime, TotalTime, User, Oid, Client, UA, Tier, DeniedBy;\nlet llm = ApiManagementGatewayLlmLog\n    | where isnotempty(RequestId)\n    | where $__timeFilter(TimeGenerated)\n    | extend Model = iff(isempty(ModelName), \"\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\nlet usage = gw\n    | join kind=leftouter (llm) on CorrelationId\n    | where isnotempty(RequestId) or ResponseCode >= 400\n    | extend IsInference = isnotempty(RequestId)\n    | lookup kind=leftouter rates on Model\n    | extend EstCost = (PromptTokens * coalesce(InPer1K, 0.0)\n                     + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0;usage | where '$client' == 'All' or Client == '$client'\n| where '$tier' == 'All' or Tier == '$tier' | summarize Value = round(sum(EstCost), 2)",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "description": "Rates come from PRICING_CL, loaded by 15-load-pricing.py. This figure excludes cache WRITE cost, which ApiManagementGatewayLlmLog does not report \u2014 see the true-cost row at the bottom of this dashboard for the complete number."
+    },
+    {
+      "id": 8,
+      "title": "Tokens by client",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 9,
+        "x": 0,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL\n    | summarize arg_max(TimeGenerated, *) by Model\n    | project Model, InPer1K = InputTokensPrice, OutPer1K = OutputTokensPrice;\nlet gwBase = ApiManagementGatewayLogs\n    | where $__timeFilter(TimeGenerated)\n    | where Url has \"/anthropic\"\n    | extend OidReq  = tostring(BackendRequestHeaders[\"x-caller-oid\"]),\n             OidResp = tostring(ResponseHeaders[\"x-caller-oid\"]),\n             RawUpn  = tostring(BackendRequestHeaders[\"x-caller-upn\"]),\n             TierReq = tostring(BackendRequestHeaders[\"x-caller-tier\"]),\n             TierResp= tostring(ResponseHeaders[\"x-caller-tier\"]),\n             DeniedBy= tostring(ResponseHeaders[\"x-claude-denied-by\"]),\n             UA      = tostring(RequestHeaders[\"User-Agent\"])\n    | extend Oid = iff(isempty(OidReq), OidResp, OidReq)\n    | extend Tier = iff(isnotempty(TierReq), TierReq, iff(isnotempty(TierResp), TierResp, \"unknown\"))\n    | extend Client = case(UA has \"claude-cli\", \"Claude Code\",\n                           UA has \"Electron\" and UA has \"Claude/\", \"Claude Desktop\",\n                           UA startswith \"Bun/\", \"Claude Desktop\",\n                           isempty(UA), \"Unknown\",\n                           \"Other\");\nlet ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, RawUpn) by Oid | project Oid, KnownUpn = RawUpn;\nlet gw = gwBase\n    | join kind=leftouter ids on Oid\n    | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, \"anonymous\")\n    | project CorrelationId, TimeGenerated, ResponseCode, Method, Url, BackendTime, TotalTime, User, Oid, Client, UA, Tier, DeniedBy;\nlet llm = ApiManagementGatewayLlmLog\n    | where isnotempty(RequestId)\n    | where $__timeFilter(TimeGenerated)\n    | extend Model = iff(isempty(ModelName), \"\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\nlet usage = gw\n    | join kind=leftouter (llm) on CorrelationId\n    | where isnotempty(RequestId) or ResponseCode >= 400\n    | extend IsInference = isnotempty(RequestId)\n    | lookup kind=leftouter rates on Model\n    | extend EstCost = (PromptTokens * coalesce(InPer1K, 0.0)\n                     + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0;usage | where '$client' == 'All' or Client == '$client'\n| where '$tier' == 'All' or Tier == '$tier' | where IsInference | summarize Tokens = sum(TotalTokens) by bin(TimeGenerated, $__interval), Client | order by TimeGenerated asc",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "time_series"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "Tokens by model",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 9,
+        "x": 9,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL\n    | summarize arg_max(TimeGenerated, *) by Model\n    | project Model, InPer1K = InputTokensPrice, OutPer1K = OutputTokensPrice;\nlet gwBase = ApiManagementGatewayLogs\n    | where $__timeFilter(TimeGenerated)\n    | where Url has \"/anthropic\"\n    | extend OidReq  = tostring(BackendRequestHeaders[\"x-caller-oid\"]),\n             OidResp = tostring(ResponseHeaders[\"x-caller-oid\"]),\n             RawUpn  = tostring(BackendRequestHeaders[\"x-caller-upn\"]),\n             TierReq = tostring(BackendRequestHeaders[\"x-caller-tier\"]),\n             TierResp= tostring(ResponseHeaders[\"x-caller-tier\"]),\n             DeniedBy= tostring(ResponseHeaders[\"x-claude-denied-by\"]),\n             UA      = tostring(RequestHeaders[\"User-Agent\"])\n    | extend Oid = iff(isempty(OidReq), OidResp, OidReq)\n    | extend Tier = iff(isnotempty(TierReq), TierReq, iff(isnotempty(TierResp), TierResp, \"unknown\"))\n    | extend Client = case(UA has \"claude-cli\", \"Claude Code\",\n                           UA has \"Electron\" and UA has \"Claude/\", \"Claude Desktop\",\n                           UA startswith \"Bun/\", \"Claude Desktop\",\n                           isempty(UA), \"Unknown\",\n                           \"Other\");\nlet ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, RawUpn) by Oid | project Oid, KnownUpn = RawUpn;\nlet gw = gwBase\n    | join kind=leftouter ids on Oid\n    | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, \"anonymous\")\n    | project CorrelationId, TimeGenerated, ResponseCode, Method, Url, BackendTime, TotalTime, User, Oid, Client, UA, Tier, DeniedBy;\nlet llm = ApiManagementGatewayLlmLog\n    | where isnotempty(RequestId)\n    | where $__timeFilter(TimeGenerated)\n    | extend Model = iff(isempty(ModelName), \"\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\nlet usage = gw\n    | join kind=leftouter (llm) on CorrelationId\n    | where isnotempty(RequestId) or ResponseCode >= 400\n    | extend IsInference = isnotempty(RequestId)\n    | lookup kind=leftouter rates on Model\n    | extend EstCost = (PromptTokens * coalesce(InPer1K, 0.0)\n                     + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0;usage | where '$client' == 'All' or Client == '$client'\n| where '$tier' == 'All' or Tier == '$tier' | where IsInference | summarize Tokens = sum(TotalTokens) by bin(TimeGenerated, $__interval), Model | order by TimeGenerated asc",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "time_series"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "Client split",
+      "type": "piechart",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL\n    | summarize arg_max(TimeGenerated, *) by Model\n    | project Model, InPer1K = InputTokensPrice, OutPer1K = OutputTokensPrice;\nlet gwBase = ApiManagementGatewayLogs\n    | where $__timeFilter(TimeGenerated)\n    | where Url has \"/anthropic\"\n    | extend OidReq  = tostring(BackendRequestHeaders[\"x-caller-oid\"]),\n             OidResp = tostring(ResponseHeaders[\"x-caller-oid\"]),\n             RawUpn  = tostring(BackendRequestHeaders[\"x-caller-upn\"]),\n             TierReq = tostring(BackendRequestHeaders[\"x-caller-tier\"]),\n             TierResp= tostring(ResponseHeaders[\"x-caller-tier\"]),\n             DeniedBy= tostring(ResponseHeaders[\"x-claude-denied-by\"]),\n             UA      = tostring(RequestHeaders[\"User-Agent\"])\n    | extend Oid = iff(isempty(OidReq), OidResp, OidReq)\n    | extend Tier = iff(isnotempty(TierReq), TierReq, iff(isnotempty(TierResp), TierResp, \"unknown\"))\n    | extend Client = case(UA has \"claude-cli\", \"Claude Code\",\n                           UA has \"Electron\" and UA has \"Claude/\", \"Claude Desktop\",\n                           UA startswith \"Bun/\", \"Claude Desktop\",\n                           isempty(UA), \"Unknown\",\n                           \"Other\");\nlet ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, RawUpn) by Oid | project Oid, KnownUpn = RawUpn;\nlet gw = gwBase\n    | join kind=leftouter ids on Oid\n    | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, \"anonymous\")\n    | project CorrelationId, TimeGenerated, ResponseCode, Method, Url, BackendTime, TotalTime, User, Oid, Client, UA, Tier, DeniedBy;\nlet llm = ApiManagementGatewayLlmLog\n    | where isnotempty(RequestId)\n    | where $__timeFilter(TimeGenerated)\n    | extend Model = iff(isempty(ModelName), \"\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\nlet usage = gw\n    | join kind=leftouter (llm) on CorrelationId\n    | where isnotempty(RequestId) or ResponseCode >= 400\n    | extend IsInference = isnotempty(RequestId)\n    | lookup kind=leftouter rates on Model\n    | extend EstCost = (PromptTokens * coalesce(InPer1K, 0.0)\n                     + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0;usage | where '$client' == 'All' or Client == '$client'\n| where '$tier' == 'All' or Tier == '$tier' | where IsInference | summarize Tokens = sum(TotalTokens) by Client",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": true
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "row",
+      "title": "People",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "panels": []
+    },
+    {
+      "id": 12,
+      "title": "Top developers by tokens",
+      "type": "bargauge",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 9,
+        "x": 0,
+        "y": 14
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL\n    | summarize arg_max(TimeGenerated, *) by Model\n    | project Model, InPer1K = InputTokensPrice, OutPer1K = OutputTokensPrice;\nlet gwBase = ApiManagementGatewayLogs\n    | where $__timeFilter(TimeGenerated)\n    | where Url has \"/anthropic\"\n    | extend OidReq  = tostring(BackendRequestHeaders[\"x-caller-oid\"]),\n             OidResp = tostring(ResponseHeaders[\"x-caller-oid\"]),\n             RawUpn  = tostring(BackendRequestHeaders[\"x-caller-upn\"]),\n             TierReq = tostring(BackendRequestHeaders[\"x-caller-tier\"]),\n             TierResp= tostring(ResponseHeaders[\"x-caller-tier\"]),\n             DeniedBy= tostring(ResponseHeaders[\"x-claude-denied-by\"]),\n             UA      = tostring(RequestHeaders[\"User-Agent\"])\n    | extend Oid = iff(isempty(OidReq), OidResp, OidReq)\n    | extend Tier = iff(isnotempty(TierReq), TierReq, iff(isnotempty(TierResp), TierResp, \"unknown\"))\n    | extend Client = case(UA has \"claude-cli\", \"Claude Code\",\n                           UA has \"Electron\" and UA has \"Claude/\", \"Claude Desktop\",\n                           UA startswith \"Bun/\", \"Claude Desktop\",\n                           isempty(UA), \"Unknown\",\n                           \"Other\");\nlet ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, RawUpn) by Oid | project Oid, KnownUpn = RawUpn;\nlet gw = gwBase\n    | join kind=leftouter ids on Oid\n    | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, \"anonymous\")\n    | project CorrelationId, TimeGenerated, ResponseCode, Method, Url, BackendTime, TotalTime, User, Oid, Client, UA, Tier, DeniedBy;\nlet llm = ApiManagementGatewayLlmLog\n    | where isnotempty(RequestId)\n    | where $__timeFilter(TimeGenerated)\n    | extend Model = iff(isempty(ModelName), \"\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\nlet usage = gw\n    | join kind=leftouter (llm) on CorrelationId\n    | where isnotempty(RequestId) or ResponseCode >= 400\n    | extend IsInference = isnotempty(RequestId)\n    | lookup kind=leftouter rates on Model\n    | extend EstCost = (PromptTokens * coalesce(InPer1K, 0.0)\n                     + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0;usage | where '$client' == 'All' or Client == '$client'\n| where '$tier' == 'All' or Tier == '$tier' | where IsInference | summarize Tokens = sum(TotalTokens) by User | top 10 by Tokens desc",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "continuous-BlPu"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": true,
+          "fields": "/^Tokens$/"
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 13,
+      "title": "Developer detail",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 15,
+        "x": 9,
+        "y": 14
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL\n    | summarize arg_max(TimeGenerated, *) by Model\n    | project Model, InPer1K = InputTokensPrice, OutPer1K = OutputTokensPrice;\nlet gwBase = ApiManagementGatewayLogs\n    | where $__timeFilter(TimeGenerated)\n    | where Url has \"/anthropic\"\n    | extend OidReq  = tostring(BackendRequestHeaders[\"x-caller-oid\"]),\n             OidResp = tostring(ResponseHeaders[\"x-caller-oid\"]),\n             RawUpn  = tostring(BackendRequestHeaders[\"x-caller-upn\"]),\n             TierReq = tostring(BackendRequestHeaders[\"x-caller-tier\"]),\n             TierResp= tostring(ResponseHeaders[\"x-caller-tier\"]),\n             DeniedBy= tostring(ResponseHeaders[\"x-claude-denied-by\"]),\n             UA      = tostring(RequestHeaders[\"User-Agent\"])\n    | extend Oid = iff(isempty(OidReq), OidResp, OidReq)\n    | extend Tier = iff(isnotempty(TierReq), TierReq, iff(isnotempty(TierResp), TierResp, \"unknown\"))\n    | extend Client = case(UA has \"claude-cli\", \"Claude Code\",\n                           UA has \"Electron\" and UA has \"Claude/\", \"Claude Desktop\",\n                           UA startswith \"Bun/\", \"Claude Desktop\",\n                           isempty(UA), \"Unknown\",\n                           \"Other\");\nlet ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, RawUpn) by Oid | project Oid, KnownUpn = RawUpn;\nlet gw = gwBase\n    | join kind=leftouter ids on Oid\n    | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, \"anonymous\")\n    | project CorrelationId, TimeGenerated, ResponseCode, Method, Url, BackendTime, TotalTime, User, Oid, Client, UA, Tier, DeniedBy;\nlet llm = ApiManagementGatewayLlmLog\n    | where isnotempty(RequestId)\n    | where $__timeFilter(TimeGenerated)\n    | extend Model = iff(isempty(ModelName), \"\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\nlet usage = gw\n    | join kind=leftouter (llm) on CorrelationId\n    | where isnotempty(RequestId) or ResponseCode >= 400\n    | extend IsInference = isnotempty(RequestId)\n    | lookup kind=leftouter rates on Model\n    | extend EstCost = (PromptTokens * coalesce(InPer1K, 0.0)\n                     + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0;usage | where '$client' == 'All' or Client == '$client'\n| where '$tier' == 'All' or Tier == '$tier'\n| summarize Requests = count(), Tokens = sum(TotalTokens), Cost = round(sum(EstCost), 2),\n            Throttled = countif(ResponseCode in (429, 403)),\n            Models = strcat_array(array_sort_asc(set_difference(make_set(Model, 8), dynamic([\"none\"]))), \", \"),\n            LastSeen = max(TimeGenerated)\n  by User\n| order by Tokens desc",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "row",
+      "title": "Health",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "panels": []
+    },
+    {
+      "id": 15,
+      "title": "Backend latency p95 by model",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL\n    | summarize arg_max(TimeGenerated, *) by Model\n    | project Model, InPer1K = InputTokensPrice, OutPer1K = OutputTokensPrice;\nlet gwBase = ApiManagementGatewayLogs\n    | where $__timeFilter(TimeGenerated)\n    | where Url has \"/anthropic\"\n    | extend OidReq  = tostring(BackendRequestHeaders[\"x-caller-oid\"]),\n             OidResp = tostring(ResponseHeaders[\"x-caller-oid\"]),\n             RawUpn  = tostring(BackendRequestHeaders[\"x-caller-upn\"]),\n             TierReq = tostring(BackendRequestHeaders[\"x-caller-tier\"]),\n             TierResp= tostring(ResponseHeaders[\"x-caller-tier\"]),\n             DeniedBy= tostring(ResponseHeaders[\"x-claude-denied-by\"]),\n             UA      = tostring(RequestHeaders[\"User-Agent\"])\n    | extend Oid = iff(isempty(OidReq), OidResp, OidReq)\n    | extend Tier = iff(isnotempty(TierReq), TierReq, iff(isnotempty(TierResp), TierResp, \"unknown\"))\n    | extend Client = case(UA has \"claude-cli\", \"Claude Code\",\n                           UA has \"Electron\" and UA has \"Claude/\", \"Claude Desktop\",\n                           UA startswith \"Bun/\", \"Claude Desktop\",\n                           isempty(UA), \"Unknown\",\n                           \"Other\");\nlet ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, RawUpn) by Oid | project Oid, KnownUpn = RawUpn;\nlet gw = gwBase\n    | join kind=leftouter ids on Oid\n    | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, \"anonymous\")\n    | project CorrelationId, TimeGenerated, ResponseCode, Method, Url, BackendTime, TotalTime, User, Oid, Client, UA, Tier, DeniedBy;\nlet llm = ApiManagementGatewayLlmLog\n    | where isnotempty(RequestId)\n    | where $__timeFilter(TimeGenerated)\n    | extend Model = iff(isempty(ModelName), \"\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\nlet usage = gw\n    | join kind=leftouter (llm) on CorrelationId\n    | where isnotempty(RequestId) or ResponseCode >= 400\n    | extend IsInference = isnotempty(RequestId)\n    | lookup kind=leftouter rates on Model\n    | extend EstCost = (PromptTokens * coalesce(InPer1K, 0.0)\n                     + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0;usage | where '$client' == 'All' or Client == '$client'\n| where '$tier' == 'All' or Tier == '$tier' | where IsInference and ResponseCode == 200 | summarize p95 = percentile(BackendTime, 95) by bin(TimeGenerated, $__interval), Model | order by TimeGenerated asc",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "time_series"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "title": "Throttle events by developer",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL\n    | summarize arg_max(TimeGenerated, *) by Model\n    | project Model, InPer1K = InputTokensPrice, OutPer1K = OutputTokensPrice;\nlet gwBase = ApiManagementGatewayLogs\n    | where $__timeFilter(TimeGenerated)\n    | where Url has \"/anthropic\"\n    | extend OidReq  = tostring(BackendRequestHeaders[\"x-caller-oid\"]),\n             OidResp = tostring(ResponseHeaders[\"x-caller-oid\"]),\n             RawUpn  = tostring(BackendRequestHeaders[\"x-caller-upn\"]),\n             TierReq = tostring(BackendRequestHeaders[\"x-caller-tier\"]),\n             TierResp= tostring(ResponseHeaders[\"x-caller-tier\"]),\n             DeniedBy= tostring(ResponseHeaders[\"x-claude-denied-by\"]),\n             UA      = tostring(RequestHeaders[\"User-Agent\"])\n    | extend Oid = iff(isempty(OidReq), OidResp, OidReq)\n    | extend Tier = iff(isnotempty(TierReq), TierReq, iff(isnotempty(TierResp), TierResp, \"unknown\"))\n    | extend Client = case(UA has \"claude-cli\", \"Claude Code\",\n                           UA has \"Electron\" and UA has \"Claude/\", \"Claude Desktop\",\n                           UA startswith \"Bun/\", \"Claude Desktop\",\n                           isempty(UA), \"Unknown\",\n                           \"Other\");\nlet ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, RawUpn) by Oid | project Oid, KnownUpn = RawUpn;\nlet gw = gwBase\n    | join kind=leftouter ids on Oid\n    | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, \"anonymous\")\n    | project CorrelationId, TimeGenerated, ResponseCode, Method, Url, BackendTime, TotalTime, User, Oid, Client, UA, Tier, DeniedBy;\nlet llm = ApiManagementGatewayLlmLog\n    | where isnotempty(RequestId)\n    | where $__timeFilter(TimeGenerated)\n    | extend Model = iff(isempty(ModelName), \"\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\nlet usage = gw\n    | join kind=leftouter (llm) on CorrelationId\n    | where isnotempty(RequestId) or ResponseCode >= 400\n    | extend IsInference = isnotempty(RequestId)\n    | lookup kind=leftouter rates on Model\n    | extend EstCost = (PromptTokens * coalesce(InPer1K, 0.0)\n                     + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0;usage | where '$client' == 'All' or Client == '$client'\n| where '$tier' == 'All' or Tier == '$tier'\n| where ResponseCode in (429, 403)\n| summarize Events = count() by User, Kind = iff(ResponseCode == 429, \"Rate limit (429)\", \"Quota exhausted (403)\")\n| order by Events desc",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      }
+    },
+    {
+      "id": 17,
+      "title": "Raw User-Agent strings \u2014 calibrate client detection here",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL\n    | summarize arg_max(TimeGenerated, *) by Model\n    | project Model, InPer1K = InputTokensPrice, OutPer1K = OutputTokensPrice;\nlet gwBase = ApiManagementGatewayLogs\n    | where $__timeFilter(TimeGenerated)\n    | where Url has \"/anthropic\"\n    | extend OidReq  = tostring(BackendRequestHeaders[\"x-caller-oid\"]),\n             OidResp = tostring(ResponseHeaders[\"x-caller-oid\"]),\n             RawUpn  = tostring(BackendRequestHeaders[\"x-caller-upn\"]),\n             TierReq = tostring(BackendRequestHeaders[\"x-caller-tier\"]),\n             TierResp= tostring(ResponseHeaders[\"x-caller-tier\"]),\n             DeniedBy= tostring(ResponseHeaders[\"x-claude-denied-by\"]),\n             UA      = tostring(RequestHeaders[\"User-Agent\"])\n    | extend Oid = iff(isempty(OidReq), OidResp, OidReq)\n    | extend Tier = iff(isnotempty(TierReq), TierReq, iff(isnotempty(TierResp), TierResp, \"unknown\"))\n    | extend Client = case(UA has \"claude-cli\", \"Claude Code\",\n                           UA has \"Electron\" and UA has \"Claude/\", \"Claude Desktop\",\n                           UA startswith \"Bun/\", \"Claude Desktop\",\n                           isempty(UA), \"Unknown\",\n                           \"Other\");\nlet ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, RawUpn) by Oid | project Oid, KnownUpn = RawUpn;\nlet gw = gwBase\n    | join kind=leftouter ids on Oid\n    | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, \"anonymous\")\n    | project CorrelationId, TimeGenerated, ResponseCode, Method, Url, BackendTime, TotalTime, User, Oid, Client, UA, Tier, DeniedBy;\nlet llm = ApiManagementGatewayLlmLog\n    | where isnotempty(RequestId)\n    | where $__timeFilter(TimeGenerated)\n    | extend Model = iff(isempty(ModelName), \"\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\nlet usage = gw\n    | join kind=leftouter (llm) on CorrelationId\n    | where isnotempty(RequestId) or ResponseCode >= 400\n    | extend IsInference = isnotempty(RequestId)\n    | lookup kind=leftouter rates on Model\n    | extend EstCost = (PromptTokens * coalesce(InPer1K, 0.0)\n                     + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0;gw\n| summarize Requests = count(), Developers = dcount(Oid), LastSeen = max(TimeGenerated)\n  by UserAgent = iff(isempty(UA), \"(none sent)\", UA), Client\n| order by Requests desc",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      },
+      "description": "Anything in Other or Unknown is a User-Agent the case() rule does not recognise. Claude Desktop reports an Electron string, not 'claude-desktop'."
+    },
+    {
+      "id": 18,
+      "type": "row",
+      "title": "History (beyond raw retention)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
+      "panels": []
+    },
+    {
+      "id": 19,
+      "title": "Tokens per day by client",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 41
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "ClaudeUsageHourly_CL\n| where $__timeFilter(TimeGenerated)\n| summarize Tokens = sum(Tokens) by bin(TimeGenerated, 1d), Client | order by TimeGenerated asc",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "time_series"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Reads the hourly summary-rule aggregate, which outlives the 30-day raw retention. Empty until the first bin lands."
+    },
+    {
+      "id": 20,
+      "title": "Tokens per developer (full retained history)",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 41
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "ClaudeUsageHourly_CL\n| where $__timeFilter(TimeGenerated)\n| summarize Requests = sum(Requests), Tokens = sum(Tokens), Throttled = sum(Throttled)\n  by User, Tier\n| order by Tokens desc",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      }
+    },
+    {
+      "id": 21,
+      "type": "row",
+      "title": "True cost (aggregate \u2014 Foundry metrics, not per-user)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 49
+      },
+      "panels": []
+    },
+    {
+      "id": 22,
+      "title": "True cost (all components)",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 50
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "ClaudeCostRollup_CL\n| summarize arg_max(TimeGenerated, *) by BinStart, Model\n| where $__timeFilter(BinStart)\n| summarize Value = round(sum(TrueCostUsd), 2)",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "description": "Every component including cache writes, priced per model from the Foundry account's own Azure Monitor metrics. Aggregate only \u2014 those metrics carry no caller dimension."
+    },
+    {
+      "id": 23,
+      "title": "Billed by pipeline",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 50
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL\n    | summarize arg_max(TimeGenerated, *) by Model\n    | project Model, InPer1K = InputTokensPrice, OutPer1K = OutputTokensPrice;\nlet gwBase = ApiManagementGatewayLogs\n    | where $__timeFilter(TimeGenerated)\n    | where Url has \"/anthropic\"\n    | extend OidReq  = tostring(BackendRequestHeaders[\"x-caller-oid\"]),\n             OidResp = tostring(ResponseHeaders[\"x-caller-oid\"]),\n             RawUpn  = tostring(BackendRequestHeaders[\"x-caller-upn\"]),\n             TierReq = tostring(BackendRequestHeaders[\"x-caller-tier\"]),\n             TierResp= tostring(ResponseHeaders[\"x-caller-tier\"]),\n             DeniedBy= tostring(ResponseHeaders[\"x-claude-denied-by\"]),\n             UA      = tostring(RequestHeaders[\"User-Agent\"])\n    | extend Oid = iff(isempty(OidReq), OidResp, OidReq)\n    | extend Tier = iff(isnotempty(TierReq), TierReq, iff(isnotempty(TierResp), TierResp, \"unknown\"))\n    | extend Client = case(UA has \"claude-cli\", \"Claude Code\",\n                           UA has \"Electron\" and UA has \"Claude/\", \"Claude Desktop\",\n                           UA startswith \"Bun/\", \"Claude Desktop\",\n                           isempty(UA), \"Unknown\",\n                           \"Other\");\nlet ids = gwBase | where isnotempty(RawUpn) | summarize arg_max(TimeGenerated, RawUpn) by Oid | project Oid, KnownUpn = RawUpn;\nlet gw = gwBase\n    | join kind=leftouter ids on Oid\n    | extend User = case(isnotempty(RawUpn), RawUpn, isnotempty(KnownUpn), KnownUpn, isnotempty(Oid), Oid, \"anonymous\")\n    | project CorrelationId, TimeGenerated, ResponseCode, Method, Url, BackendTime, TotalTime, User, Oid, Client, UA, Tier, DeniedBy;\nlet llm = ApiManagementGatewayLlmLog\n    | where isnotempty(RequestId)\n    | where $__timeFilter(TimeGenerated)\n    | extend Model = iff(isempty(ModelName), \"\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\nlet usage = gw\n    | join kind=leftouter (llm) on CorrelationId\n    | where isnotempty(RequestId) or ResponseCode >= 400\n    | extend IsInference = isnotempty(RequestId)\n    | lookup kind=leftouter rates on Model\n    | extend EstCost = (PromptTokens * coalesce(InPer1K, 0.0)\n                     + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0;usage | where '$client' == 'All' or Client == '$client'\n| where '$tier' == 'All' or Tier == '$tier' | summarize Value = round(sum(EstCost), 2)",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "description": "What the gateway pipeline actually charges. Excludes cache writes, which no APIM surface reports. The gap against 'True cost' to its left is the point of this row."
+    },
+    {
+      "id": 24,
+      "title": "Coverage %",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 50
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "ClaudeCostRollup_CL\n| summarize arg_max(TimeGenerated, *) by BinStart, Model\n| where $__timeFilter(BinStart)\n| summarize T = sum(TrueCostUsd), V = sum(VisibleCostUsd)\n| extend Value = iff(T > 0, round(100.0 * V / T, 1), 0.0)\n| project Value",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 50
+              },
+              {
+                "color": "green",
+                "value": 90
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "description": "Share of true cost the gateway can observe at all. Both figures come from the same metrics, so this isolates cache-write blindness rather than mixing in scope drift."
+    },
+    {
+      "id": 25,
+      "title": "Unbilled cache-write cost",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 50
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "ClaudeCostRollup_CL\n| summarize arg_max(TimeGenerated, *) by BinStart, Model\n| where $__timeFilter(BinStart)\n| summarize Value = round(sum(CacheWrite5mCost + CacheWrite1hCost), 2)",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "description": "Cache-write spend attributable to nobody. Reported by no APIM log, payload or metric, so it is absent from every per-developer counter and from budget enforcement."
+    },
+    {
+      "id": 26,
+      "title": "Cost by component",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 54
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "ClaudeCostRollup_CL\n| summarize arg_max(TimeGenerated, *) by BinStart, Model\n| where $__timeFilter(BinStart)\n| summarize Input = sum(InputCost), Output = sum(OutputCost),\n            ['Cache read'] = sum(CacheReadCost),\n            ['Cache write 5m'] = sum(CacheWrite5mCost),\n            ['Cache write 1h'] = sum(CacheWrite1hCost)\n  by bin(BinStart, 1h)\n| project-rename TimeGenerated = BinStart\n| order by TimeGenerated asc",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "time_series"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Where the money actually goes. On measured traffic cache writes were 62% of Claude spend; the two bottom bands are invisible to every other panel on this dashboard."
+    },
+    {
+      "id": 27,
+      "title": "Cache-write tokens by TTL",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 54
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "ClaudeCostRollup_CL\n| summarize arg_max(TimeGenerated, *) by BinStart, Model\n| where $__timeFilter(BinStart)\n| summarize ['5m TTL'] = sum(CacheWrite5mTokens),\n            ['1h TTL'] = sum(CacheWrite1hTokens)\n  by bin(BinStart, 1h)\n| project-rename TimeGenerated = BinStart\n| order by TimeGenerated asc",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "time_series"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "1h writes bill at 2x base input against 1.25x for 5m, and on measured traffic they were the single largest cost line. Nothing here identifies which client sets them \u2014 that needs request-side telemetry."
+    },
+    {
+      "id": 28,
+      "title": "Cost by model",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-azure-monitor-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 62
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": {
+            "type": "grafana-azure-monitor-datasource",
+            "uid": "${datasource}"
+          },
+          "azureLogAnalytics": {
+            "query": "ClaudeCostRollup_CL\n| summarize arg_max(TimeGenerated, *) by BinStart, Model\n| where $__timeFilter(BinStart)\n| summarize Input = round(sum(InputCost), 4), Output = round(sum(OutputCost), 4),\n            ['Cache read'] = round(sum(CacheReadCost), 4),\n            ['Write 5m'] = round(sum(CacheWrite5mCost), 4),\n            ['Write 1h'] = round(sum(CacheWrite1hCost), 4),\n            ['True cost'] = round(sum(TrueCostUsd), 4),\n            ['Visible cost'] = round(sum(VisibleCostUsd), 4)\n  by Model\n| order by ['True cost'] desc",
+            "resources": [
+              "${workspace}"
+            ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          },
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": true,
+          "reducer": [
+            "sum"
+          ],
+          "fields": ""
+        }
+      },
+      "description": "Per-model breakdown. Models with no rate in 15-load-pricing.py are dropped by the reconciler and named on its stderr \u2014 a Claude model missing here is costing money and reporting zero."
+    },
+    {
+      "id": 29,
+      "type": "row",
+      "title": "Team governance and chargeback",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 70 },
+      "panels": []
+    },
+    {
+      "id": 30,
+      "title": "Estimated cost by team",
+      "type": "table",
+      "datasource": { "type": "grafana-azure-monitor-datasource", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 71 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": { "type": "grafana-azure-monitor-datasource", "uid": "${datasource}" },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL | summarize arg_max(TimeGenerated, *) by Model | project Model, InPer1K=InputTokensPrice, OutPer1K=OutputTokensPrice;\nlet gw = ApiManagementGatewayLogs | where $__timeFilter(TimeGenerated) | where Url has \"/anthropic\" | extend TeamId=tostring(coalesce(BackendRequestHeaders[\"x-caller-team-id\"], ResponseHeaders[\"x-caller-team-id\"])), TeamState=tostring(coalesce(BackendRequestHeaders[\"x-team-governance-state\"], ResponseHeaders[\"x-team-governance-state\"]));\nlet llm = ApiManagementGatewayLlmLog | where $__timeFilter(TimeGenerated) and isnotempty(RequestId) | extend Model=iff(isempty(ModelName), \"unknown\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\ngw | join kind=inner llm on CorrelationId | where isnotempty(TeamId) and TeamState == \"ok\" | lookup kind=leftouter rates on Model | extend CostUsd=(PromptTokens * coalesce(InPer1K, 0.0) + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0 | summarize Requests=count(), Tokens=sum(TotalTokens), EstimatedCostUsd=round(sum(CostUsd), 4) by TeamId | order by EstimatedCostUsd desc",
+            "resources": [ "${workspace}" ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "filterable": true } }, "overrides": [] },
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "description": "Team-attributed APIM cost. Requires a fresh caller token with exactly one team and one matching profile role. Excludes cache writes."
+    },
+    {
+      "id": 31,
+      "title": "Estimated developer cost by team",
+      "type": "table",
+      "datasource": { "type": "grafana-azure-monitor-datasource", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 71 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": { "type": "grafana-azure-monitor-datasource", "uid": "${datasource}" },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL | summarize arg_max(TimeGenerated, *) by Model | project Model, InPer1K=InputTokensPrice, OutPer1K=OutputTokensPrice;\nlet gw = ApiManagementGatewayLogs | where $__timeFilter(TimeGenerated) | where Url has \"/anthropic\" | extend TeamId=tostring(coalesce(BackendRequestHeaders[\"x-caller-team-id\"], ResponseHeaders[\"x-caller-team-id\"])), TeamState=tostring(coalesce(BackendRequestHeaders[\"x-team-governance-state\"], ResponseHeaders[\"x-team-governance-state\"])), Oid=tostring(coalesce(BackendRequestHeaders[\"x-caller-oid\"], ResponseHeaders[\"x-caller-oid\"])), Developer=tostring(coalesce(BackendRequestHeaders[\"x-caller-upn\"], BackendRequestHeaders[\"x-caller-oid\"], ResponseHeaders[\"x-caller-oid\"]));\nlet llm = ApiManagementGatewayLlmLog | where $__timeFilter(TimeGenerated) and isnotempty(RequestId) | extend Model=iff(isempty(ModelName), \"unknown\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\ngw | join kind=inner llm on CorrelationId | where isnotempty(TeamId) and TeamState == \"ok\" | lookup kind=leftouter rates on Model | extend CostUsd=(PromptTokens * coalesce(InPer1K, 0.0) + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0 | summarize Requests=count(), Tokens=sum(TotalTokens), EstimatedCostUsd=round(sum(CostUsd), 4), Models=make_set(Model, 10) by TeamId, Developer, Oid | order by EstimatedCostUsd desc",
+            "resources": [ "${workspace}" ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "filterable": true } }, "overrides": [] },
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "description": "Primary developer chargeback view, segregated by resolved team. Excludes aggregate-only cache-write cost."
+    },
+    {
+      "id": 32,
+      "title": "Model usage and cost by team",
+      "type": "table",
+      "datasource": { "type": "grafana-azure-monitor-datasource", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 80 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": { "type": "grafana-azure-monitor-datasource", "uid": "${datasource}" },
+          "azureLogAnalytics": {
+            "query": "let rates = PRICING_CL | summarize arg_max(TimeGenerated, *) by Model | project Model, InPer1K=InputTokensPrice, OutPer1K=OutputTokensPrice;\nlet gw = ApiManagementGatewayLogs | where $__timeFilter(TimeGenerated) | where Url has \"/anthropic\" | extend TeamId=tostring(coalesce(BackendRequestHeaders[\"x-caller-team-id\"], ResponseHeaders[\"x-caller-team-id\"])), TeamState=tostring(coalesce(BackendRequestHeaders[\"x-team-governance-state\"], ResponseHeaders[\"x-team-governance-state\"]));\nlet llm = ApiManagementGatewayLlmLog | where $__timeFilter(TimeGenerated) and isnotempty(RequestId) | extend Model=iff(isempty(ModelName), \"unknown\", replace_regex(ModelName, @\"-\\d{8}$\", \"\"));\ngw | join kind=inner llm on CorrelationId | where isnotempty(TeamId) and TeamState == \"ok\" | lookup kind=leftouter rates on Model | extend CostUsd=(PromptTokens * coalesce(InPer1K, 0.0) + CompletionTokens * coalesce(OutPer1K, 0.0)) / 1000.0 | summarize Requests=count(), PromptTokens=sum(PromptTokens), CompletionTokens=sum(CompletionTokens), TotalTokens=sum(TotalTokens), EstimatedCostUsd=round(sum(CostUsd), 4) by TeamId, Model | order by EstimatedCostUsd desc",
+            "resources": [ "${workspace}" ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "filterable": true } }, "overrides": [] },
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "description": "Prompt/completion usage and estimated APIM-visible cost per model and team."
+    },
+    {
+      "id": 33,
+      "title": "Team attribution health",
+      "type": "table",
+      "datasource": { "type": "grafana-azure-monitor-datasource", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 80 },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "Azure Log Analytics",
+          "datasource": { "type": "grafana-azure-monitor-datasource", "uid": "${datasource}" },
+          "azureLogAnalytics": {
+            "query": "ApiManagementGatewayLogs | where $__timeFilter(TimeGenerated) | where Url has \"/anthropic\" | extend TeamId=tostring(coalesce(BackendRequestHeaders[\"x-caller-team-id\"], ResponseHeaders[\"x-caller-team-id\"])), TeamState=tostring(coalesce(BackendRequestHeaders[\"x-team-governance-state\"], ResponseHeaders[\"x-team-governance-state\"])) | summarize Requests=count() by TeamState=iff(isempty(TeamState), \"legacy/unset\", TeamState), TeamId=iff(isempty(TeamId), \"unattributed\", TeamId) | order by Requests desc",
+            "resources": [ "${workspace}" ],
+            "dashboardTime": false,
+            "resultFormat": "table"
+          }
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "filterable": true } }, "overrides": [] },
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "description": "Use this before chargeback panels: only governance state ok with a nonempty team ID is billable to a team."
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "grafana-azure-monitor-datasource",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      },
+      {
+        "name": "workspace",
+        "label": "Log Analytics workspace",
+        "type": "constant",
+        "query": "WORKSPACE_RESOURCE_ID_PLACEHOLDER",
+        "current": {
+          "text": "WORKSPACE_RESOURCE_ID_PLACEHOLDER",
+          "value": "WORKSPACE_RESOURCE_ID_PLACEHOLDER"
+        },
+        "hide": 2
+      },
+      {
+        "name": "client",
+        "label": "Client",
+        "type": "custom",
+        "query": "All,Claude Code,Claude Desktop,Other,Unknown",
+        "current": {
+          "text": "All",
+          "value": "All"
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "All",
+            "selected": true
+          },
+          {
+            "text": "Claude Code",
+            "value": "Claude Code",
+            "selected": false
+          },
+          {
+            "text": "Claude Desktop",
+            "value": "Claude Desktop",
+            "selected": false
+          },
+          {
+            "text": "Other",
+            "value": "Other",
+            "selected": false
+          },
+          {
+            "text": "Unknown",
+            "value": "Unknown",
+            "selected": false
+          }
+        ],
+        "includeAll": false,
+        "multi": false,
+        "hide": 0
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "All"
+        },
+        "includeAll": false,
+        "multi": false,
+        "name": "tier",
+        "label": "Tier",
+        "type": "custom",
+        "query": "All,pro,basic,lite",
+        "options": [
+          {
+            "selected": true,
+            "text": "All",
+            "value": "All"
+          },
+          {
+            "selected": false,
+            "text": "pro",
+            "value": "pro"
+          },
+          {
+            "selected": false,
+            "text": "basic",
+            "value": "basic"
+          },
+          {
+            "selected": false,
+            "text": "lite",
+            "value": "lite"
+          }
+        ],
+        "refresh": 0,
+        "hide": 0
+      }
+    ]
+  },
+  "description": "Cost on this dashboard is what the gateway can observe: it excludes cache WRITE tokens, which no APIM log, Event Hub payload or metric reports. The 'True cost' row at the bottom prices those from Foundry metrics and is aggregate-only \u2014 those metrics carry no caller dimension, so cache-write cost cannot be attributed to a developer. Event Hub budget counters include cache reads. Inference logs exclude empty RequestId probes; rejected requests remain in health counts. IsStreamCompletion is an unreliable diagnostic flag."
+}
