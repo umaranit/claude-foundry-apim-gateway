@@ -11,7 +11,7 @@ It works with **Claude Code** (CLI and VS Code) and **Claude Desktop**.
 
 | Step | Document | For |
 |---|---|---|
-| 1 | [Prerequisites checklist](docs/01-prerequisites-checklist.md) | Customer admins, before the deployment |
+| 1 | [Prerequisites checklist](docs/01-prerequisites-checklist.md) | Azure, Entra and AI administrators, before the deployment |
 | 2 | [Admin deployment guide: Linux / Bash](docs/02-admin-deployment-guide-linux.md) (recommended) or [Windows / PowerShell](docs/03-admin-deployment-guide-windows.md) | Platform admin |
 | 3 | [Developer onboarding guide](docs/04-developer-onboarding-guide.md) | Developers |
 | 4 | [Operations guide](docs/05-operations-guide.md) | Platform admin: teams, budgets, monitoring, troubleshooting, clean-up |
@@ -42,7 +42,7 @@ admin/       Administrator setup scripts (Bash and PowerShell), configuration ex
 developer/   Developer workstation setup scripts (Bash and PowerShell) and the client field reference
 infra/       Bicep templates, APIM policy, workbooks and Grafana dashboard deployed by the setup
 snippets/    Function code (usage processor, budget API), pricing loader, cost reconciler, test scripts
-docs/        Customer guides and architecture diagrams
+docs/        Deployment, developer and operations guides, and architecture diagrams
 tests/       Regression tests for the pricing and processor arithmetic
 ```
 
@@ -78,6 +78,6 @@ Do not commit environment-specific files: `admin/setup.local.json`, `admin/setup
 
 Based on the *Claude on Azure* guide and code ([monuminu.github.io/claude-on-azure](https://monuminu.github.io/claude-on-azure/))
 and [sombaner/claude-on-azure-sombaner](https://github.com/sombaner/claude-on-azure-sombaner).
-This version adds customer deployment guides, Windows PowerShell fixes and configuration-validation fixes.
+This version adds deployment and operations guides, Windows PowerShell fixes and configuration-validation fixes.
 
 Content is licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); code is licensed MIT. See [LICENSE](LICENSE).
