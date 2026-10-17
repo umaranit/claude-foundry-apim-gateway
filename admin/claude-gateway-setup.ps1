@@ -1,14 +1,22 @@
-#requires -Version 7.2
+#requires -Version 7.3
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$ConfigPath,
+    [string]$ConfigPath,
     [ValidateSet('all', 'preflight', 'reporting', 'retention', 'export')][string]$Stage = 'all',
     [switch]$Interactive,
     [switch]$NonInteractive,
     [switch]$DryRun,
-    [switch]$Yes
+    [switch]$Yes,
+    [string]$LogFile
 )
 $ErrorActionPreference = 'Stop'
+# Pass embedded quotes to native tools (jq, python, func) correctly on Windows.
+$PSNativeCommandArgumentPassing = 'Windows'
+$DebugMode = $PSBoundParameters.ContainsKey('Debug')
+if ($DebugMode) { $DebugPreference = 'Continue' }
+$ConfigGenerated = $false
+$CurrentStep = 'startup'
+$TranscriptStarted = $false
 $Root = Split-Path $PSScriptRoot -Parent
 $Config = $null
 $WorkspaceGroup = ''
@@ -32,11 +40,24 @@ $BudgetName = ''
 $Quota = $null
 $EffectiveConfigPath = ''
 
+function Write-SetupDebug([string]$Message) {
+    if ($DebugMode) { Write-Host "[$((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))] DEBUG: $Message" }
+}
 function Invoke-Azure {
     $Arguments = $args
-    $Result = & az @Arguments --only-show-errors
+    $script:CurrentStep = "Azure CLI: az $(($Arguments | Select-Object -First 3) -join ' ')"
+    Write-SetupDebug $script:CurrentStep
+    $OutputMode = if ($DebugMode) { '--verbose' } else { '--only-show-errors' }
+    $Result = & az @Arguments $OutputMode
     if ($LASTEXITCODE -ne 0) { throw "Azure CLI failed: $($Arguments[0..([Math]::Min(2, $Arguments.Length - 1))] -join ' '). Resolve the error and rerun; no resources are automatically deleted." }
     return $Result
+}
+function Invoke-GraphPatch([string]$Url, [string]$Json) {
+    $BodyFile = [IO.Path]::GetTempFileName()
+    try {
+        Set-Content -LiteralPath $BodyFile -Value $Json -Encoding utf8NoBOM -NoNewline
+        Invoke-Azure rest --method PATCH --url $Url --headers Content-Type=application/json --body "@$BodyFile" -o none | Out-Null
+    } finally { Remove-Item -LiteralPath $BodyFile -Force -ErrorAction SilentlyContinue }
 }
 function Install-Prerequisites {
     if (-not (Get-Command func -ErrorAction SilentlyContinue)) {
@@ -67,7 +88,13 @@ function Install-Prerequisites {
         }
         if (-not (Get-Command func -ErrorAction SilentlyContinue)) { throw 'Azure Functions Core Tools v4 was installed but func is not on PATH; restart the shell and rerun.' }
     }
-    Get-Command $Config.pythonExecutable -ErrorAction Stop | Out-Null
+    if (-not (Get-Command $Config.pythonExecutable -ErrorAction SilentlyContinue)) {
+        throw "pythonExecutable '$($Config.pythonExecutable)' was not found. Set pythonExecutable to a Python 3 executable, for example a virtual environment's python.exe."
+    }
+    $PythonVersion = & $Config.pythonExecutable --version 2>&1
+    if ($LASTEXITCODE -ne 0 -or "$PythonVersion" -notmatch 'Python 3\.') {
+        throw "pythonExecutable '$($Config.pythonExecutable)' is not a working Python 3 (on Windows this is often the Microsoft Store placeholder). Install Python 3 and set pythonExecutable to its python.exe."
+    }
     & $Config.pythonExecutable -c 'import azure.identity, azure.monitor.ingestion, requests, redis' 2>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Installing Python loader dependencies into $($Config.pythonExecutable)."
@@ -89,6 +116,13 @@ function Read-SetupValue([string]$Label, [string]$Default = '') {
     if (-not $Answer) { $Answer = $Default }
     if (-not $Answer) { throw "$Label is required." }
     return $Answer
+}
+function Read-SetupMatching([string]$Label, [string]$Default, [string]$Pattern, [string]$ErrorText) {
+    while ($true) {
+        $Answer = Read-SetupValue $Label $Default
+        if ($Answer -cmatch $Pattern) { return $Answer }
+        [Console]::Error.WriteLine($ErrorText)
+    }
 }
 function Read-SetupChoice([string]$Label, [string]$Default, [string[]]$Choices) {
     $Answer = Read-SetupValue "$Label ($($Choices -join '/'))" $Default
@@ -115,6 +149,15 @@ function ConvertTo-TeamId([string]$Name) {
     return (($Name.ToLowerInvariant() -replace '[^a-z0-9]+', '-') -replace '^-+|-+$', '')
 }
 function Initialize-InteractiveConfig {
+    $GuidPattern = '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$'
+    if ($ConfigGenerated -or "$($Config.subscriptionId)" -notmatch $GuidPattern -or "$($Config.tenantId)" -notmatch $GuidPattern) {
+        $SubscriptionDefault = if ("$($Config.subscriptionId)" -match $GuidPattern) { $Config.subscriptionId } else { '' }
+        $TenantDefault = if ("$($Config.tenantId)" -match $GuidPattern) { $Config.tenantId } else { '' }
+        $PublisherDefault = if ($Config.publisherName) { $Config.publisherName } else { 'Platform Engineering' }
+        $Config.subscriptionId = Read-SetupMatching 'Subscription ID' $SubscriptionDefault $GuidPattern 'Enter the subscription ID as a GUID.'
+        $Config.tenantId = Read-SetupMatching 'Tenant ID' $TenantDefault $GuidPattern 'Enter the tenant ID as a GUID.'
+        $Config.publisherName = Read-SetupValue 'Publisher name' $PublisherDefault
+    }
     $Config.resourceGroup = Read-SetupValue 'Gateway resource group name' $Config.resourceGroup
     $Config.foundryResourceGroup = Read-SetupValue 'Foundry resource group name' ($Config.foundryResourceGroup ?? $Config.resourceGroup)
     $Config.apimName = Read-SetupValue 'APIM name' $Config.apimName
@@ -127,10 +170,14 @@ function Initialize-InteractiveConfig {
     $GatewayDisplayName = if ($Config.gatewayDisplayName) { $Config.gatewayDisplayName } else { "Claude Gateway - $($Config.apimName)" }
     $Config.gatewayDisplayName = Read-SetupValue 'Enter a name for the gateway service principal' $GatewayDisplayName
     $Config.budgetApiAudience = ''
-    $Config.workspaceResourceId = Read-SetupValue 'Log Analytics workspace resource ID' $Config.workspaceResourceId
-    $Config.subscriptionId = $Config.workspaceResourceId.Split('/')[2]
+    $Config.workspaceResourceId = Read-SetupMatching 'Log Analytics workspace resource ID' $Config.workspaceResourceId `
+        "^/subscriptions/$([regex]::Escape($Config.subscriptionId))/resourceGroups/[^/]+/providers/Microsoft\.OperationalInsights/workspaces/[^/]+$" `
+        "Enter the full Log Analytics workspace resource ID from subscription $($Config.subscriptionId)."
     $Config.foundryAccountName = Read-SetupValue 'Foundry resource name' $Config.foundryAccountName
-    $Config.namePrefix = Read-SetupValue 'Resource name prefix' $Config.namePrefix
+    $Config.namePrefix = Read-SetupMatching 'Resource name prefix' $Config.namePrefix '^[a-z0-9]{3,11}$' 'Use 3-11 lowercase letters or digits.'
+    $PythonDefault = if ($Config.pythonExecutable) { $Config.pythonExecutable } else { 'python3' }
+    if ($IsWindows -and $PythonDefault -eq 'python3') { $PythonDefault = 'python' }
+    $Config.pythonExecutable = Read-SetupValue 'Python executable (missing loader packages are installed into it)' $PythonDefault
 
     if ((Read-SetupChoice 'Configure team governance now?' 'yes' @('yes', 'no')) -eq 'yes') {
         $Profiles = @($Config.teamGovernance.profiles)
@@ -140,16 +187,18 @@ function Initialize-InteractiveConfig {
         do {
             $TeamName = Read-SetupValue 'Team name'
             $Emails = @((Read-SetupValue 'Team member email IDs (comma separated)').Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-            $Profile = Read-SetupChoice 'Team profile' 'regular' @('regular', 'power')
+            $TeamProfile = Read-SetupChoice 'Team profile' 'regular' @('regular', 'power')
             $Tier = Read-SetupChoice 'Default user tier' 'basic' @('pro', 'basic', 'lite')
             $TeamId = ConvertTo-TeamId $TeamName
             if ($TeamId.Length -lt 3) { throw 'Team name must produce an identifier of at least three letters or digits.' }
-            $Role = Read-SetupValue 'Team role' "$TeamId.$Profile"
+            $Role = Read-SetupValue 'Team role' "$TeamId.$TeamProfile"
             $AllowedModels = @(Read-SetupModels)
-            $Teams += @{ id = $TeamId; displayName = $TeamName; groupDisplayName = "Claude Team - $TeamName"; teamRoleValue = $Role; profile = $Profile; defaultUserTier = $Tier; allowedModels = $AllowedModels; members = $Emails }
+            $Teams += @{ id = $TeamId; displayName = $TeamName; groupDisplayName = "Claude Team - $TeamName"; teamRoleValue = $Role; profile = $TeamProfile; defaultUserTier = $Tier; allowedModels = $AllowedModels; members = $Emails }
             $More = Read-SetupChoice 'Add another team?' 'no' @('yes', 'no')
         } while ($More -eq 'yes')
         $Config.teamGovernance = @{ mode = $Mode; actionGroupIds = $ActionGroupIds; profiles = $Profiles; teams = $Teams }
+    } elseif ($ConfigGenerated) {
+        $Config.Remove('teamGovernance')
     }
 }
 function Initialize-GatewayApplication {
@@ -179,8 +228,7 @@ function Initialize-GatewayApplication {
                     if any(.[]; .value == "Claude.User") then map(if .value == "Claude.User" then . + {isEnabled:true, allowedMemberTypes:((.allowedMemberTypes // []) + ["User"] | unique)} else . end) else . + [{id:$role, value:"Claude.User", displayName:"Claude User", description:"Access to the Claude gateway", isEnabled:true, allowedMemberTypes:["User"]}] end) |
         {identifierUris, api, appRoles}'
     if ($LASTEXITCODE -ne 0) { throw 'Could not build the gateway application configuration.' }
-    Invoke-Azure rest --method PATCH --url "https://graph.microsoft.com/v1.0/applications/$ObjectId" `
-        --headers Content-Type=application/json --body $ApiPatch -o none | Out-Null
+    Invoke-GraphPatch "https://graph.microsoft.com/v1.0/applications/$ObjectId" ($ApiPatch -join "`n")
     $ServicePrincipals = @(Invoke-Azure ad sp list --filter "appId eq '$ClientId'" -o json | ConvertFrom-Json -AsHashtable)
     if ($ServicePrincipals.Count -eq 0) { Invoke-Azure ad sp create --id $ClientId -o none | Out-Null }
     $script:Config.gatewayAudience = $ClientId
@@ -210,6 +258,7 @@ function Initialize-BudgetApiApplication {
 }
 function Invoke-Deployment([string]$Name, [string]$Group, [string]$File, [hashtable]$Parameters) {
     Write-Host "Deploying $Name in $Group"
+    $script:CurrentStep = "deployment $Name"
     $Wrapped = @{}
     foreach ($Key in $Parameters.Keys) { $Wrapped[$Key] = @{ value = $Parameters[$Key] } }
     $ParameterFile = Join-Path $Temp "$Name.parameters.json"
@@ -262,18 +311,25 @@ function Initialize-ClaudeDesktopClient {
     $PreAuthorizedApplications += @{ appId = $ClientId; delegatedPermissionIds = @($Scope[0].id) }
     $App.api.preAuthorizedApplications = $PreAuthorizedApplications
     $Body = @{ api = $App.api } | ConvertTo-Json -Depth 30 -Compress
-    Invoke-Azure rest --method PATCH --url "https://graph.microsoft.com/v1.0/applications/$($App.id)" `
-        --headers Content-Type=application/json --body $Body -o none | Out-Null
+    Invoke-GraphPatch "https://graph.microsoft.com/v1.0/applications/$($App.id)" $Body
     Write-Host "Claude Desktop public client: $ClientId"
     return $ClientId
 }
 function Export-Configuration {
     $ClientSettings = $Config.clientConfiguration.settingsFile
     if ($ClientSettings -and -not [IO.Path]::IsPathRooted($ClientSettings)) { $ClientSettings = Join-Path $Root $ClientSettings }
-    & (Join-Path $PSScriptRoot 'export-claude-client-configuration.ps1') -SubscriptionId $Config.subscriptionId -TenantId $Config.tenantId `
-        -ClientId $Config.clientConfiguration.clientId -Scopes $Config.clientConfiguration.scopes -ClientSettings $ClientSettings `
-        -ResourceGroup $Config.resourceGroup -TokenResource $Config.tokenResource -OpusModel $Config.models.opus `
-        -SonnetModel $Config.models.sonnet -HaikuModel $Config.models.haiku -Output $Output -Force
+    $ExportArguments = @{
+        SubscriptionId = $Config.subscriptionId; TenantId = $Config.tenantId; ResourceGroup = $Config.resourceGroup
+        TokenResource = $Config.tokenResource; Output = $Output; Force = $true
+    }
+    if ($Config.clientConfiguration.clientId) { $ExportArguments.ClientId = $Config.clientConfiguration.clientId }
+    if ($Config.clientConfiguration.scopes) { $ExportArguments.Scopes = $Config.clientConfiguration.scopes }
+    if ($ClientSettings) { $ExportArguments.ClientSettings = $ClientSettings }
+    if ($Config.models.opus) { $ExportArguments.OpusModel = $Config.models.opus }
+    if ($Config.models.sonnet) { $ExportArguments.SonnetModel = $Config.models.sonnet }
+    if ($Config.models.haiku) { $ExportArguments.HaikuModel = $Config.models.haiku }
+    $script:CurrentStep = 'onboarding export'
+    & (Join-Path $PSScriptRoot 'export-claude-client-configuration.ps1') @ExportArguments
 }
 function Set-Retention {
     $TableId = "$($Config.workspaceResourceId)/tables/ClaudeUsageHourly_CL"
@@ -306,6 +362,8 @@ function Invoke-Reporting {
     }
 }
 function Publish-Function([string]$Name, [string]$Directory) {
+    $script:CurrentStep = "publish Function $Name"
+    Write-SetupDebug $script:CurrentStep
     Push-Location (Join-Path $Root $Directory)
     try {
         & func azure functionapp publish $Name --subscription $Config.subscriptionId --python --build remote
@@ -313,11 +371,37 @@ function Publish-Function([string]$Name, [string]$Directory) {
     } finally { Pop-Location }
 }
 
-Get-Command jq -ErrorAction Stop | Out-Null
-$Config = Get-Content -Raw $ConfigPath | ConvertFrom-Json -AsHashtable
+trap {
+    [Console]::Error.WriteLine("[$((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))] ERROR at line $($_.InvocationInfo.ScriptLineNumber) during ${CurrentStep}: $($_.Exception.Message)")
+    break
+}
+if ($LogFile) {
+    $LogDirectory = Split-Path -Parent $LogFile
+    if ($LogDirectory) { New-Item -ItemType Directory -Force -Path $LogDirectory | Out-Null }
+    Start-Transcript -Path $LogFile -Append | Out-Null
+    $TranscriptStarted = $true
+    Write-Host "Streaming setup output to $LogFile"
+}
+try {
+Write-SetupDebug 'Debug logging enabled (Azure CLI verbose mode).'
+if (-not (Get-Command jq -ErrorAction SilentlyContinue)) {
+    throw 'jq is required. On Windows run: winget install jqlang.jq (then open a new PowerShell 7 window). On macOS run: brew install jq.'
+}
 if ($Interactive -and $NonInteractive) { throw 'Use either -Interactive or -NonInteractive, not both.' }
-if ($Interactive -or (-not $NonInteractive -and -not [Console]::IsInputRedirected)) { Initialize-InteractiveConfig }
 $IsInteractive = $Interactive -or (-not $NonInteractive -and -not [Console]::IsInputRedirected)
+if (-not $ConfigPath) {
+    if (-not $IsInteractive) { throw 'Non-interactive mode requires -ConfigPath FILE.' }
+    $ConfigPath = Join-Path $PSScriptRoot 'setup.local.json'
+    $ConfigGenerated = $true
+}
+if ((Test-Path -LiteralPath $ConfigPath) -and (Get-Item -LiteralPath $ConfigPath).Length -gt 0) {
+    $Config = Get-Content -Raw -LiteralPath $ConfigPath | ConvertFrom-Json -AsHashtable
+} elseif ($ConfigGenerated) {
+    $Config = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'setup.example.json') | ConvertFrom-Json -AsHashtable
+} else {
+    throw "Config file is empty or missing: $ConfigPath"
+}
+if ($IsInteractive) { Initialize-InteractiveConfig }
 $ConfigToValidate = $Config
 $UsesTemporaryGatewayIdentity = $false
 if ($IsInteractive -and $Config.gatewayAudience -notmatch '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$') {
@@ -327,7 +411,16 @@ if ($IsInteractive -and $Config.gatewayAudience -notmatch '^[0-9a-fA-F]{8}(-[0-9
     $ConfigToValidate.tokenResource = 'api://00000000-0000-4000-8000-000000000001'
 }
 $ConfigJson = $ConfigToValidate | ConvertTo-Json -Depth 30 -Compress | & jq -e -f (Join-Path $PSScriptRoot 'validate-config.jq')
-if ($LASTEXITCODE -ne 0) { throw 'Invalid admin config.' }
+if ($LASTEXITCODE -ne 0) {
+    if ($IsInteractive) {
+        # Keep the rejected answers so they can be reviewed against admin/validate-config.jq (no secrets are stored in the config).
+        $RejectedConfigPath = Join-Path $PSScriptRoot 'setup.rejected.json'
+        $ConfigToValidate | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $RejectedConfigPath -Encoding utf8NoBOM
+        Write-Host "The rejected configuration was written to $RejectedConfigPath for review."
+    }
+    throw 'Invalid admin config.'
+}
+if ($ConfigGenerated -and $DryRun) { Write-Host "DRY RUN: generated configuration was validated but not written. Rerun without -DryRun to save $ConfigPath." }
 if (-not $UsesTemporaryGatewayIdentity) { $Config = $ConfigJson | ConvertFrom-Json -AsHashtable }
 $WorkspaceGroup = $Config.workspaceResourceId.Split('/')[4]
 $WorkspaceName = $Config.workspaceResourceId.Split('/')[-1]
@@ -348,6 +441,12 @@ if ($IsInteractive) {
     $ConfigJson = $Config | ConvertTo-Json -Depth 30 -Compress | & jq -e -f (Join-Path $PSScriptRoot 'validate-config.jq')
     if ($LASTEXITCODE -ne 0) { throw 'The generated gateway application configuration is invalid.' }
     $Config = $ConfigJson | ConvertFrom-Json -AsHashtable
+    if ($ConfigGenerated) {
+        $TemporaryConfig = "$ConfigPath.tmp.$([Guid]::NewGuid().ToString('N').Substring(0, 6))"
+        $Config | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $TemporaryConfig -Encoding utf8NoBOM
+        Move-Item -LiteralPath $TemporaryConfig -Destination $ConfigPath -Force
+        Write-Host "Saved interactive configuration to $ConfigPath."
+    }
 }
 $Temp = Join-Path ([IO.Path]::GetTempPath()) "claude-admin-$([Guid]::NewGuid())"
 [IO.Directory]::CreateDirectory($Temp) | Out-Null
@@ -370,7 +469,8 @@ try {
     if ($Config.pricingPublisherPrincipalId) {
         if ($Identity.oid -ne $Config.pricingPublisherPrincipalId) { throw 'Python credential identity does not match the configured pricingPublisherPrincipalId.' }
     } else {
-        $PrincipalType = Invoke-Azure rest --method GET --url "https://graph.microsoft.com/v1.0/directoryObjects/$($Identity.oid)" --query '"@odata.type"' -o tsv
+        $DirectoryObject = Invoke-Azure rest --method GET --url "https://graph.microsoft.com/v1.0/directoryObjects/$($Identity.oid)" -o json | ConvertFrom-Json -AsHashtable
+        $PrincipalType = $DirectoryObject['@odata.type']
         $Config.pricingPublisherPrincipalType = switch ($PrincipalType) {
             '#microsoft.graph.user' { 'User' }
             '#microsoft.graph.servicePrincipal' { 'ServicePrincipal' }
@@ -380,6 +480,7 @@ try {
         Write-Host "Pricing publisher principal auto-detected from the active Python credential: $($Identity.oid) ($($Config.pricingPublisherPrincipalType))"
     }
     Invoke-Azure group show --name $Config.resourceGroup -o none
+    Invoke-Azure group show --name $Config.foundryResourceGroup -o none
     Invoke-Azure cognitiveservices account show --name $Config.foundryAccountName --resource-group $Config.foundryResourceGroup -o none
     if ((Invoke-Azure resource show --ids $Config.workspaceResourceId --query location -o tsv) -ne $Config.workspaceLocation) { throw 'workspaceLocation does not match the existing workspace.' }
     $Models = @(Invoke-Azure cognitiveservices account deployment list --name $Config.foundryAccountName --resource-group $Config.foundryResourceGroup -o json | ConvertFrom-Json -AsHashtable)
@@ -468,6 +569,7 @@ try {
     Publish-Function $BudgetApps[0].name 'snippets/18-budget-api'
     Publish-Function $ProcessorApps[0].name 'snippets/17-usage-processor'
     if ($Config.teamGovernance -and $Config.teamGovernance.mode -ne 'off') {
+        $global:LASTEXITCODE = 0
         & (Join-Path $PSScriptRoot 'setup-teams-governance-claude-gateway.ps1') -ConfigPath $EffectiveConfigPath -Yes -SkipInfrastructure
         if ($LASTEXITCODE -ne 0) { throw 'Entra team governance provisioning failed.' }
     }
@@ -511,3 +613,6 @@ try {
     }
     Write-Host 'Selected steps completed. Runtime budget enforcement still requires traffic, telemetry delivery and per-tier verification; deployment success alone is not proof.'
 } finally { Remove-Item -LiteralPath $Temp -Recurse -Force }
+} finally {
+    if ($TranscriptStarted) { Stop-Transcript | Out-Null }
+}

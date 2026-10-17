@@ -1,4 +1,4 @@
-#requires -Version 7.2
+#requires -Version 7.3
 <#
 .SYNOPSIS
 Provisions Entra ID security groups, gateway app roles and group-to-app-role assignments
@@ -27,6 +27,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Pass embedded quotes to native tools (jq) correctly on Windows.
+$PSNativeCommandArgumentPassing = 'Windows'
 $Root = Split-Path $PSScriptRoot -Parent
 $Drift = $false
 
@@ -37,6 +39,14 @@ function Invoke-Azure {
 }
 
 function New-GuidString { return [Guid]::NewGuid().ToString() }
+
+function Invoke-GraphWrite([string]$Method, [string]$Url, [string]$Json) {
+    $BodyFile = [IO.Path]::GetTempFileName()
+    try {
+        Set-Content -LiteralPath $BodyFile -Value $Json -Encoding utf8NoBOM -NoNewline
+        Invoke-Azure rest --method $Method --url $Url --headers 'Content-Type=application/json' --body "@$BodyFile" -o none | Out-Null
+    } finally { Remove-Item -LiteralPath $BodyFile -Force -ErrorAction SilentlyContinue }
+}
 
 function ConvertTo-ODataLiteral([string]$Value) { return $Value.Replace("'", "''") }
 
@@ -75,6 +85,9 @@ function Invoke-GovernanceDeployment {
     Write-Host 'Deployed team governance infrastructure and workbook (modules 22 and 23).'
 }
 
+if (-not (Get-Command jq -ErrorAction SilentlyContinue)) {
+    throw 'jq is required. On Windows run: winget install jqlang.jq (then open a new PowerShell 7 window). On macOS run: brew install jq.'
+}
 $ConfigJson = & jq -ef (Join-Path $Root 'admin/validate-config.jq') $ConfigPath
 if ($LASTEXITCODE -ne 0) { throw 'Invalid admin config.' }
 $Config = $ConfigJson | ConvertFrom-Json -AsHashtable
@@ -124,8 +137,8 @@ foreach ($Team in $Config.teamGovernance.teams) {
     $DesiredRoles.Add(@{ value = "Claude.Tier.$TierName"; displayName = "Individual tier - $($Team.defaultUserTier)"; description = "Claude individual budget tier: $($Team.defaultUserTier)" })
     $DesiredRoles.Add(@{ value = $Team.teamRoleValue; displayName = "Team - $($Team.displayName)"; description = "Claude team membership: $($Team.displayName)" })
 }
-foreach ($Profile in $Config.teamGovernance.profiles) {
-    $DesiredRoles.Add(@{ value = $Profile.roleValue; displayName = "Team profile - $($Profile.name)"; description = "Claude team budget profile: $($Profile.name)" })
+foreach ($TeamProfile in $Config.teamGovernance.profiles) {
+    $DesiredRoles.Add(@{ value = $TeamProfile.roleValue; displayName = "Team profile - $($TeamProfile.name)"; description = "Claude team budget profile: $($TeamProfile.name)" })
 }
 $DesiredRoles = @($DesiredRoles | Sort-Object -Property value -Unique)
 
@@ -156,7 +169,7 @@ if ($MissingRoles.Count -gt 0) {
         Write-Host "DRIFT: missing or disabled gateway app roles: $($MissingRoles -join ', ')"
     } else {
         $Body = @{ appRoles = @($Untouched + $Resolved) } | ConvertTo-Json -Depth 30 -Compress
-        Invoke-Azure rest --method PATCH --url "https://graph.microsoft.com/v1.0/applications/$($App.id)" --headers 'Content-Type=application/json' --body $Body -o none | Out-Null
+        Invoke-GraphWrite PATCH "https://graph.microsoft.com/v1.0/applications/$($App.id)" $Body
         Write-Host "Ensured gateway app roles: $($MissingRoles -join ', ')"
     }
 }
@@ -249,7 +262,7 @@ foreach ($Team in $Config.teamGovernance.teams) {
                 $RoleAssignments.Add(@{ role = $RoleValue; status = 'missing' })
             } else {
                 $Body = @{ principalId = $GroupId; resourceId = $GatewaySpId; appRoleId = $RoleId } | ConvertTo-Json -Compress
-                Invoke-Azure rest --method POST --url "https://graph.microsoft.com/v1.0/servicePrincipals/$GatewaySpId/appRoleAssignedTo" --headers 'Content-Type=application/json' --body $Body -o none | Out-Null
+                Invoke-GraphWrite POST "https://graph.microsoft.com/v1.0/servicePrincipals/$GatewaySpId/appRoleAssignedTo" $Body
                 $RoleAssignments.Add(@{ role = $RoleValue; status = 'assigned' })
             }
         }
@@ -294,7 +307,7 @@ Write-Output $ManifestJson
 if ($ManifestOutput) { Set-Content -Path $ManifestOutput -Value $ManifestJson -Encoding utf8NoBOM }
 
 if ($Check -and $Drift) {
-    Write-Error 'Reconciliation found drift; rerun without -Check (with -Yes) to converge, or review the manifest above.'
+    [Console]::Error.WriteLine('Reconciliation found drift; rerun without -Check (with -Yes) to converge, or review the manifest above.')
     exit 1
 }
 Write-Host 'Team governance reconciliation complete. Group deletions and member removals are never automatic.'

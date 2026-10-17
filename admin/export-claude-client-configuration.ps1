@@ -1,4 +1,4 @@
-#requires -Version 7.2
+#requires -Version 7.3
 [CmdletBinding()]
 param(
     [string]$SubscriptionId,
@@ -17,6 +17,8 @@ param(
     [switch]$Force
 )
 $ErrorActionPreference = 'Stop'
+# Pass JSON arguments with embedded quotes to jq correctly on Windows.
+$PSNativeCommandArgumentPassing = 'Windows'
 $Deployment = $null
 $App = $null
 $Settings = '{}'
@@ -36,12 +38,16 @@ function Read-Value([string]$Label, [string]$Default = '') {
     if (-not $Answer) { throw "$Label is required." }
     return $Answer
 }
-Get-Command jq -ErrorAction Stop | Out-Null
+if (-not (Get-Command jq -ErrorAction SilentlyContinue)) {
+    throw 'jq is required. On Windows run: winget install jqlang.jq (then open a new PowerShell 7 window). On macOS run: brew install jq.'
+}
 if ((Test-Path $Output) -and -not $Force) { throw 'Output exists; use -Force to replace it.' }
 if ($DeploymentFile) {
     $Deployment = Get-Content -Raw $DeploymentFile | ConvertFrom-Json -AsHashtable
 } else {
-    if (-not $SubscriptionId -or -not $ResourceGroup) { throw 'Supply -SubscriptionId and -ResourceGroup, or -DeploymentFile.' }
+    if (-not (Get-Command az -ErrorAction SilentlyContinue)) { throw 'Install Azure CLI first.' }
+    if (-not $SubscriptionId) { $SubscriptionId = Read-Value 'Azure subscription ID' }
+    if (-not $ResourceGroup) { $ResourceGroup = Read-Value 'Gateway resource group' }
     $Deployment = & az deployment group show --subscription $SubscriptionId --resource-group $ResourceGroup --name $DeploymentName --only-show-errors -o json
     if ($LASTEXITCODE -ne 0) { throw 'Cannot read gateway deployment.' }
     $Deployment = $Deployment | ConvertFrom-Json -AsHashtable
@@ -73,8 +79,11 @@ if (-not $ClientId) { $ClientId = Read-Value 'Desktop OIDC client ID (public-cli
 if (-not $Scopes) { $Scopes = Read-Value 'Scopes (space-separated; include the registered gateway API scope)' }
 if (-not $OpusModel) { $OpusModel = Read-Value 'Opus model deployment name' 'claude-opus-5' }
 if (-not $SonnetModel) { $SonnetModel = Read-Value 'Sonnet model deployment name' 'claude-sonnet-5' }
-if (-not $HaikuModel) { $HaikuModel = Read-Value 'Haiku model deployment name' 'claude-haiku-5-4' }
-if ($ClientSettings) { $Settings = Get-Content -Raw $ClientSettings }
+if (-not $HaikuModel) { $HaikuModel = Read-Value 'Haiku model deployment name' 'claude-haiku-4-5' }
+if ($ClientSettings) {
+    $Settings = (& jq -c -e . $ClientSettings) -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw "Client settings file is not valid JSON: $ClientSettings" }
+}
 $Config = & jq -n --arg url $Deployment.properties.outputs.gatewayBaseUrl.value --arg tenant $TenantId --arg client $ClientId --arg scopes $Scopes `
     --arg opus $OpusModel --arg sonnet $SonnetModel --arg haiku $HaikuModel --argjson settings $Settings -f (Join-Path $PSScriptRoot 'client-configuration.jq')
 if ($LASTEXITCODE -ne 0) { throw 'Invalid client configuration.' }

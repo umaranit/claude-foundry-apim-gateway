@@ -86,7 +86,7 @@ fi
 [[ -n "$SCOPES" ]] || SCOPES=$(prompt_value 'Scopes (space-separated; include the registered gateway API scope)')
 [[ -n "$OPUS_MODEL" ]] || OPUS_MODEL=$(prompt_value 'Opus model deployment name' 'claude-opus-5')
 [[ -n "$SONNET_MODEL" ]] || SONNET_MODEL=$(prompt_value 'Sonnet model deployment name' 'claude-sonnet-5')
-[[ -n "$HAIKU_MODEL" ]] || HAIKU_MODEL=$(prompt_value 'Haiku model deployment name' 'claude-haiku-5-4')
+[[ -n "$HAIKU_MODEL" ]] || HAIKU_MODEL=$(prompt_value 'Haiku model deployment name' 'claude-haiku-4-5')
 [[ -z "$CLIENT_SETTINGS_FILE" ]] || SETTINGS=$(jq -e . "$CLIENT_SETTINGS_FILE")
 CONFIG=$(jq -n --arg url "$(jq -er .properties.outputs.gatewayBaseUrl.value <<< "$DEPLOYMENT")" --arg tenant "$TENANT_ID" --arg client "$CLIENT_ID" --arg scopes "$SCOPES" \
   --arg opus "$OPUS_MODEL" --arg sonnet "$SONNET_MODEL" --arg haiku "$HAIKU_MODEL" --argjson settings "$SETTINGS" -f "$ROOT/client-configuration.jq")

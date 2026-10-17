@@ -45,7 +45,7 @@ if ([.subscriptionId, .tenantId, .gatewayAudience] | all(.[]; guid)) and
         (.profile as $p | ($config.teamGovernance.profiles | map(.name) | index($p)) != null) and
         (.defaultUserTier as $t | ($config.tiersConfig | map(.name) | index($t)) != null) and
         ((.allowedModels == null) or (.allowedModels | type == "array" and length > 0 and uniqueBy(.) and
-          all(.[]; type == "string" and . as $model | (supportedModels | index($model)) != null))) and
+          all(.[]; type == "string" and (. as $model | (supportedModels | index($model)) != null)))) and
         (.members | type == "array" and length > 0 and
           all(.[]; type == "string" and length > 0 and test("^[^<>\r\n]+@[^<>\r\n]+$")))))
   end)

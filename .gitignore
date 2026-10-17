@@ -12,3 +12,11 @@ __pycache__/
 admin/setup.local.json
 claude-client-configuration.json
 logs/claude-gateway-setup.log
+# Environment-specific files (never commit)
+admin/setup.local.json
+admin/setup.local.*.json
+admin/setup.rejected.json
+admin/setup.tmp.json
+developer/claude-client-configuration.json
+logs/
+admin-backup/

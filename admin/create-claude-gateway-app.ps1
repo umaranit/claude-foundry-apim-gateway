@@ -1,4 +1,4 @@
-#requires -Version 7.2
+#requires -Version 7.3
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][Guid]$TenantId,
@@ -8,6 +8,8 @@ param(
     [switch]$Yes
 )
 $ErrorActionPreference = 'Stop'
+# Pass JSON arguments with embedded quotes to jq correctly on Windows.
+$PSNativeCommandArgumentPassing = 'Windows'
 
 function Invoke-Azure {
     $Arguments = $args
@@ -24,7 +26,10 @@ if ($DryRun) {
     return
 }
 if (-not $Yes) { throw 'Review -DryRun, then pass -Yes to authorize Entra changes.' }
-Get-Command az, jq -ErrorAction Stop | Out-Null
+if (-not (Get-Command az -ErrorAction SilentlyContinue)) { throw 'Azure CLI (az) is required. Install it and run az login --tenant <tenant-id>.' }
+if (-not (Get-Command jq -ErrorAction SilentlyContinue)) {
+    throw 'jq is required. On Windows run: winget install jqlang.jq (then open a new PowerShell 7 window). On macOS run: brew install jq.'
+}
 $Account = Invoke-Azure account show -o json | ConvertFrom-Json
 if ($Account.tenantId -ne $TenantId.ToString()) {
     throw 'Wrong Azure tenant. Run az login --tenant <tenant-id> and retry.'
@@ -63,8 +68,13 @@ $Patch = $Application | ConvertTo-Json -Depth 50 -Compress |
     & jq -ce --arg scopeId ([Guid]::NewGuid().ToString()) --argjson roles $RolesJson `
         -f (Join-Path $PSScriptRoot 'gateway-app-registration.jq')
 if ($LASTEXITCODE -ne 0) { throw 'Could not build the gateway application configuration.' }
-Invoke-Azure rest --method PATCH --url "https://graph.microsoft.com/v1.0/applications/$ObjectId" `
-    --headers Content-Type=application/json --body $Patch -o none | Out-Null
+# az is a .cmd file on Windows and strips quotes from inline JSON, so send the body from a file.
+$BodyFile = [IO.Path]::GetTempFileName()
+try {
+    Set-Content -LiteralPath $BodyFile -Value ($Patch -join "`n") -Encoding utf8NoBOM -NoNewline
+    Invoke-Azure rest --method PATCH --url "https://graph.microsoft.com/v1.0/applications/$ObjectId" `
+        --headers Content-Type=application/json --body "@$BodyFile" -o none | Out-Null
+} finally { Remove-Item -LiteralPath $BodyFile -Force -ErrorAction SilentlyContinue }
 $ServicePrincipals = @(Invoke-Azure ad sp list --filter "appId eq '$ClientId'" -o json | ConvertFrom-Json -AsHashtable)
 if ($ServicePrincipals.Count -gt 1) { throw 'Multiple service principals found for the gateway application.' }
 if ($ServicePrincipals.Count -eq 0) {
