@@ -117,6 +117,20 @@ prompt_models() {
   [[ $(jq 'length' <<< "$models") -gt 0 ]] || { echo 'Choose at least one model.' >&2; return 1; }
   printf '%s' "$models"
 }
+explain_invalid_config() {
+  # Lists the configuration rules that failed, in plain words (see admin/validate-config-check.jq).
+  local json=$1 check="$ROOT/admin/validate-config-check.jq" lines=''
+  [[ -f "$check" ]] || return 0
+  lines=$(jq -c -f "$check" <<< "$json" 2>/dev/null |
+    jq -r '.[] | select(.ok != true) | "  - " + .rule + (if .detail then " (" + (.detail | tostring) + ")" else "" end)' 2>/dev/null || true)
+  if [[ -n "$lines" ]]; then
+    printf 'Configuration rules that failed:\n%s\n' "$lines" >&2
+  fi
+  if [[ "$INTERACTIVE" == true ]]; then
+    (umask 077; printf '%s\n' "$json" | jq . > "$ROOT/admin/setup.rejected.json" 2>/dev/null) || true
+    printf 'The rejected configuration was written to %s for review.\n' "$ROOT/admin/setup.rejected.json" >&2
+  fi
+}
 slug() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g'; }
 configure_interactively() {
   local subscription_id tenant_id publisher_name resource_group foundry_resource_group apim_name apim_location workspace_location workbook_location publisher_email gateway_display_name workspace_id foundry_name name_prefix
@@ -372,11 +386,18 @@ else
 fi
 if [[ "$INTERACTIVE" == true ]]; then configure_interactively; fi
 if [[ "$INTERACTIVE" == true && ! $(jq -r '.gatewayAudience // empty' <<< "$CONFIG") =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]]; then
-  jq --arg audience '00000000-0000-4000-8000-000000000001' \
-    '.gatewayAudience = $audience | .tokenResource = ("api://" + $audience)' <<< "$CONFIG" |
-    jq -e -f "$ROOT/admin/validate-config.jq" >/dev/null
+  VALIDATION_INPUT=$(jq --arg audience '00000000-0000-4000-8000-000000000001' \
+    '.gatewayAudience = $audience | .tokenResource = ("api://" + $audience)' <<< "$CONFIG")
+  if ! jq -e -f "$ROOT/admin/validate-config.jq" <<< "$VALIDATION_INPUT" >/dev/null; then
+    explain_invalid_config "$VALIDATION_INPUT"
+    exit 1
+  fi
 else
-  CONFIG=$(jq -e -f "$ROOT/admin/validate-config.jq" <<< "$CONFIG")
+  if ! VALIDATED_CONFIG=$(jq -e -f "$ROOT/admin/validate-config.jq" <<< "$CONFIG"); then
+    explain_invalid_config "$CONFIG"
+    exit 1
+  fi
+  CONFIG=$VALIDATED_CONFIG
 fi
 if [[ "$CONFIG_GENERATED" == true ]]; then
   if [[ "$DRY_RUN" == true ]]; then
@@ -404,10 +425,19 @@ command -v az >/dev/null || { echo 'Install Azure CLI.' >&2; exit 1; }
 ACCOUNT=$(azure account show --subscription "$SUBSCRIPTION_ID" -o json)
 [[ $(jq -r .tenantId <<< "$ACCOUNT") == "$TENANT_ID" ]] || { echo 'Wrong Azure tenant; log in to the configured tenant.' >&2; exit 1; }
 azure account set --subscription "$SUBSCRIPTION_ID"
+# Python steps (identity check, price loading) must use the same Azure CLI sign-in as this script.
+if [[ -z "${AZURE_TOKEN_CREDENTIALS:-}" && -z "${AZURE_CLIENT_ID:-}" ]]; then
+  export AZURE_TOKEN_CREDENTIALS=AzureCliCredential
+  debug 'Python sign-in: AzureCliCredential (set AZURE_TOKEN_CREDENTIALS to override).'
+fi
 if [[ "$STAGE" != preflight && "$YES" != true ]]; then echo 'Review --dry-run, then pass --yes to authorize the selected changes.' >&2; exit 2; fi
 if [[ "$INTERACTIVE" == true ]]; then
   ensure_gateway_app
-  CONFIG=$(jq -e -f "$ROOT/admin/validate-config.jq" <<< "$CONFIG")
+  if ! VALIDATED_CONFIG=$(jq -e -f "$ROOT/admin/validate-config.jq" <<< "$CONFIG"); then
+    explain_invalid_config "$CONFIG"
+    exit 1
+  fi
+  CONFIG=$VALIDATED_CONFIG
   if [[ "$CONFIG_GENERATED" == true ]]; then
     umask 077
     TEMP_CONFIG=$(mktemp "${CONFIG_PATH}.tmp.XXXXXX")
@@ -431,7 +461,7 @@ if [[ "$STAGE" == reporting ]]; then reporting; exit 0; fi
 command -v func >/dev/null || { echo 'Install Azure Functions Core Tools v4.' >&2; exit 1; }
 command -v "$PYTHON" >/dev/null || { echo 'Set pythonExecutable to a Python environment with the loader dependencies.' >&2; exit 1; }
 "$PYTHON" -c 'import azure.identity, azure.monitor.ingestion, requests, redis'
-IDENTITY=$("$PYTHON" -c 'import base64,json; from azure.identity import DefaultAzureCredential; token=DefaultAzureCredential().get_token("https://management.azure.com/.default").token.split(".")[1]; claims=json.loads(base64.urlsafe_b64decode(token+"="*(-len(token)%4))); print(json.dumps({"oid":claims["oid"],"tid":claims["tid"]}))')
+IDENTITY=$("$PYTHON" -c 'import base64,json; from azure.identity import DefaultAzureCredential; token=DefaultAzureCredential(process_timeout=60).get_token("https://management.azure.com/.default").token.split(".")[1]; claims=json.loads(base64.urlsafe_b64decode(token+"="*(-len(token)%4))); print(json.dumps({"oid":claims["oid"],"tid":claims["tid"]}))')
 [[ $(jq -r .tid <<< "$IDENTITY") == "$TENANT_ID" ]] || { echo 'Python credential resolved to a different tenant than tenantId.' >&2; exit 1; }
 PRICING_OID=$(jq -r .oid <<< "$IDENTITY")
 if [[ -z "$(jq -r '.pricingPublisherPrincipalId // empty' <<< "$CONFIG")" ]]; then
@@ -449,7 +479,10 @@ fi
 azure group show --name "$RESOURCE_GROUP" -o none
 azure group show --name "$FOUNDRY_RESOURCE_GROUP" -o none
 azure cognitiveservices account show --name "$FOUNDRY_NAME" --resource-group "$FOUNDRY_RESOURCE_GROUP" -o none
-[[ $(azure resource show --ids "$WORKSPACE_ID" --query location -o tsv) == "$(value .workspaceLocation)" ]] || { echo 'workspaceLocation does not match the existing workspace.' >&2; exit 1; }
+CURRENT_STEP='Log Analytics workspace check'
+WS_REGION=$(az resource show --ids "$WORKSPACE_ID" --query location -o tsv --only-show-errors 2>/dev/null || true)
+[[ -n "$WS_REGION" ]] || { printf 'Log Analytics workspace not found: %s. Check the subscription, resource group and workspace name in workspaceResourceId (admin/setup.local.json), then rerun.\n' "$WORKSPACE_ID" >&2; exit 1; }
+[[ "$WS_REGION" == "$(value .workspaceLocation)" ]] || { printf 'workspaceLocation (%s) does not match the region of the existing workspace (%s).\n' "$(value .workspaceLocation)" "$WS_REGION" >&2; exit 1; }
 MODELS=$(azure cognitiveservices account deployment list --name "$FOUNDRY_NAME" --resource-group "$FOUNDRY_RESOURCE_GROUP" -o json)
 for FAMILY in opus sonnet haiku; do
   MODEL=$(jq -r --arg family "$FAMILY" '.models[$family]' <<< "$CONFIG")
@@ -526,8 +559,22 @@ REDIS_NAME=$(jq -er '.redisHost.value | split(".")[0]' <<< "$BUDGET")
 deploy pricing-access "$RESOURCE_GROUP" admin/pricing-access.bicep "redisName=$REDIS_NAME" "pricingPublisherPrincipalId=$(value .pricingPublisherPrincipalId)" \
   "pricingPublisherPrincipalType=$(value .pricingPublisherPrincipalType)" "foundryAccountName=$FOUNDRY_NAME" "foundryResourceGroup=$FOUNDRY_RESOURCE_GROUP" "enableReconciler=$(jq -r .options.reconcile <<< "$CONFIG")" \
   "cosmosAccountName=$(jq -er .cosmosAccountName.value <<< "$BUDGET")" >/dev/null
-"$PYTHON" "$ROOT/snippets/15-load-pricing.py" --dcr-endpoint "$(jq -er .pricingDcrEndpoint.value <<< "$TIERS")" \
-  --dcr-immutable-id "$(jq -er .pricingDcrImmutableId.value <<< "$TIERS")" --redis-host "$(jq -er .redisHost.value <<< "$BUDGET")"
+# Fetch the two tokens once through Azure CLI first: the Python loader waits only about 10 seconds for Azure CLI.
+CURRENT_STEP='price loading'
+for TOKEN_SCOPE in 'https://monitor.azure.com//.default' 'https://redis.azure.com/.default'; do
+  az account get-access-token --scope "$TOKEN_SCOPE" -o none --only-show-errors >/dev/null 2>&1 || true
+done
+PRICE_ARGS=(--dcr-endpoint "$(jq -er .pricingDcrEndpoint.value <<< "$TIERS")"
+  --dcr-immutable-id "$(jq -er .pricingDcrImmutableId.value <<< "$TIERS")" --redis-host "$(jq -er .redisHost.value <<< "$BUDGET")")
+for ATTEMPT in 1 2 3; do
+  if "$PYTHON" "$ROOT/snippets/15-load-pricing.py" "${PRICE_ARGS[@]}"; then break; fi
+  if [[ "$ATTEMPT" -eq 3 ]]; then
+    echo 'Price loading failed after 3 attempts; check the Azure CLI sign-in, RBAC propagation and network access, then rerun.' >&2
+    exit 1
+  fi
+  echo "Price loading failed (attempt $ATTEMPT of 3). Retrying in 60 seconds; new role assignments and sign-ins can take a few minutes." >&2
+  sleep 60
+done
 APPS=$(azure functionapp list --resource-group "$RESOURCE_GROUP" -o json)
 PROCESSOR_NAME=$(jq -er --arg oid "$(jq -er .processorPrincipalId.value <<< "$BUDGET")" '[.[] | select(.identity.principalId == $oid)] | if length == 1 then .[0].name else error("Cannot uniquely resolve processor app") end' <<< "$APPS")
 BUDGET_NAME=$(jq -er --arg oid "$(jq -er .budgetApiPrincipalId.value <<< "$BUDGET")" '[.[] | select(.identity.principalId == $oid)] | if length == 1 then .[0].name else error("Cannot uniquely resolve budget app") end' <<< "$APPS")
@@ -538,7 +585,10 @@ if [[ $(jq -r '.teamGovernance.mode // "off"' <<< "$CONFIG") != off ]]; then
 fi
 GOVERNANCE_ARGS=("apimName=$APIM_NAME" "logAnalyticsWorkspaceId=$WORKSPACE_ID" "logAnalyticsWorkspaceName=$WORKSPACE_NAME" "workbookLocation=$(value .workbookLocation)" "teamGovernanceMode=$(jq -r '.teamGovernance.mode // "off"' <<< "$CONFIG")")
 if jq -e '.teamGovernance != null' <<< "$CONFIG" >/dev/null; then
-  GOVERNANCE_ARGS+=("profiles=$(jq -c .teamGovernance.profiles <<< "$CONFIG")" "teams=$(jq -c .teamGovernance.teams <<< "$CONFIG")")
+  printf '%s\n' "$MODELS" > "$TEMP/foundry-deployments.json"
+  TEAMS_WITH_DEPLOYMENTS=$(jq -c .teamGovernance.teams <<< "$CONFIG" |
+    jq -c --slurpfile deps "$TEMP/foundry-deployments.json" -f "$ROOT/admin/expand-allowed-models.jq")
+  GOVERNANCE_ARGS+=("profiles=$(jq -c .teamGovernance.profiles <<< "$CONFIG")" "teams=$TEAMS_WITH_DEPLOYMENTS")
   GOVERNANCE_ARGS+=("actionGroupIds=$(jq -c '.teamGovernance.actionGroupIds // []' <<< "$CONFIG")")
 fi
 GOVERNANCE=$(deploy 22-team-governance "$RESOURCE_GROUP" infra/22-team-governance.bicep "${GOVERNANCE_ARGS[@]}")

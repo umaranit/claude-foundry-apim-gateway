@@ -156,7 +156,7 @@ def fetch_ledger_rows(endpoint: str, database: str, container: str, month: str) 
     from azure.cosmos import CosmosClient
     from azure.identity import DefaultAzureCredential
 
-    client = CosmosClient(endpoint, credential=DefaultAzureCredential())
+    client = CosmosClient(endpoint, credential=DefaultAzureCredential(process_timeout=60))
     ledger = client.get_database_client(database).get_container_client(container)
     return list(ledger.query_items(
         query="SELECT c.id, c.month, c.oid, c.tier, c.costUsd, c.teamId, c.teamProfile FROM c WHERE c.month = @month",
@@ -170,7 +170,7 @@ def get_redis_client(host: str, port: int = 6380):
     import redis
     from azure.identity import DefaultAzureCredential
 
-    token = DefaultAzureCredential().get_token("https://redis.azure.com/.default")
+    token = DefaultAzureCredential(process_timeout=60).get_token("https://redis.azure.com/.default")
     payload = token.token.split(".")[1]
     payload += "=" * (-len(payload) % 4)
     username = json.loads(base64.urlsafe_b64decode(payload))["oid"]
@@ -258,7 +258,7 @@ def fetch_metrics(resource_id: str, hours: int, grain_minutes: int) -> dict:
     """
     from azure.identity import DefaultAzureCredential
 
-    token = DefaultAzureCredential().get_token("https://management.azure.com/.default")
+    token = DefaultAzureCredential(process_timeout=60).get_token("https://management.azure.com/.default")
     start, end = aligned_window(hours, grain_minutes)
 
     resp = requests.get(
@@ -333,7 +333,7 @@ def upload_to_log_analytics(rows, endpoint, immutable_id, stream) -> None:
     from azure.identity import DefaultAzureCredential
     from azure.monitor.ingestion import LogsIngestionClient
 
-    client = LogsIngestionClient(endpoint=endpoint, credential=DefaultAzureCredential())
+    client = LogsIngestionClient(endpoint=endpoint, credential=DefaultAzureCredential(process_timeout=60))
     client.upload(rule_id=immutable_id, stream_name=stream, logs=rows)
     print(f"Uploaded {len(rows)} rows to {stream}")
 

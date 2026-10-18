@@ -145,7 +145,7 @@ def upload_to_log_analytics(rows, endpoint, immutable_id, stream) -> None:
     from azure.identity import DefaultAzureCredential
     from azure.monitor.ingestion import LogsIngestionClient
 
-    client = LogsIngestionClient(endpoint=endpoint, credential=DefaultAzureCredential())
+    client = LogsIngestionClient(endpoint=endpoint, credential=DefaultAzureCredential(process_timeout=60))
     client.upload(rule_id=immutable_id, stream_name=stream, logs=rows)
     print(f"Uploaded {len(rows)} rows to {stream}")
 
@@ -166,7 +166,7 @@ def upload_to_redis(rows, redis_host: str, redis_port: int = 6380) -> None:
     import redis
     from azure.identity import DefaultAzureCredential
 
-    token = DefaultAzureCredential().get_token("https://redis.azure.com/.default")
+    token = DefaultAzureCredential(process_timeout=60).get_token("https://redis.azure.com/.default")
     payload = token.token.split(".")[1]
     payload += "=" * (-len(payload) % 4)
     # The username is the caller's object id, not a name. Wrong value here is a flat auth

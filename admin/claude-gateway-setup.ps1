@@ -117,6 +117,28 @@ function Read-SetupValue([string]$Label, [string]$Default = '') {
     if (-not $Answer) { throw "$Label is required." }
     return $Answer
 }
+function Expand-AllowedModels($Teams, $Deployments) {
+    # Adds each allowed model's Foundry deployment names (for example claude-sonnet-5-apim)
+    # to the team's allowedModels, because clients send the deployment name.
+    $DeploymentsFile = [IO.Path]::GetTempFileName()
+    try {
+        ConvertTo-Json -InputObject @($Deployments) -Depth 30 -Compress | Set-Content -LiteralPath $DeploymentsFile -Encoding utf8NoBOM
+        $Expanded = ConvertTo-Json -InputObject @($Teams) -Depth 30 -Compress |
+            & jq -c --slurpfile deps $DeploymentsFile -f (Join-Path $PSScriptRoot 'expand-allowed-models.jq')
+        if ($LASTEXITCODE -ne 0) { throw 'Could not map the allowed models to Foundry deployment names.' }
+        return @(($Expanded -join "`n") | ConvertFrom-Json -AsHashtable)
+    } finally { Remove-Item -LiteralPath $DeploymentsFile -Force -ErrorAction SilentlyContinue }
+}
+function Show-ConfigRuleFailures([string]$Json) {
+    # Lists the configuration rules that failed, in plain words (see admin/validate-config-check.jq).
+    $CheckPath = Join-Path $PSScriptRoot 'validate-config-check.jq'
+    if (-not (Test-Path -LiteralPath $CheckPath)) { return }
+    $Lines = @($Json | & jq -c -f $CheckPath 2>$null | & jq -r '.[] | select(.ok != true) | "  - " + .rule + (if .detail then " (" + (.detail | tostring) + ")" else "" end)' 2>$null)
+    if ($Lines.Count -gt 0) {
+        [Console]::Error.WriteLine('Configuration rules that failed:')
+        foreach ($Line in $Lines) { [Console]::Error.WriteLine($Line) }
+    }
+}
 function Read-SetupMatching([string]$Label, [string]$Default, [string]$Pattern, [string]$ErrorText) {
     while ($true) {
         $Answer = Read-SetupValue $Label $Default
@@ -412,6 +434,7 @@ if ($IsInteractive -and $Config.gatewayAudience -notmatch '^[0-9a-fA-F]{8}(-[0-9
 }
 $ConfigJson = $ConfigToValidate | ConvertTo-Json -Depth 30 -Compress | & jq -e -f (Join-Path $PSScriptRoot 'validate-config.jq')
 if ($LASTEXITCODE -ne 0) {
+    Show-ConfigRuleFailures ($ConfigToValidate | ConvertTo-Json -Depth 30 -Compress)
     if ($IsInteractive) {
         # Keep the rejected answers so they can be reviewed against admin/validate-config.jq (no secrets are stored in the config).
         $RejectedConfigPath = Join-Path $PSScriptRoot 'setup.rejected.json'
@@ -435,11 +458,20 @@ Get-Command az -ErrorAction Stop | Out-Null
 $Account = Invoke-Azure account show --subscription $Config.subscriptionId -o json | ConvertFrom-Json -AsHashtable
 if ($Account.tenantId -ne $Config.tenantId) { throw 'Wrong Azure tenant; log in to the configured tenant.' }
 Invoke-Azure account set --subscription $Config.subscriptionId | Out-Null
+# Python steps (identity check, price loading) must use the same Azure CLI sign-in as this script.
+# Otherwise DefaultAzureCredential can pick a cached Windows/Office account from another tenant.
+if (-not $env:AZURE_TOKEN_CREDENTIALS -and -not $env:AZURE_CLIENT_ID) {
+    $env:AZURE_TOKEN_CREDENTIALS = 'AzureCliCredential'
+    Write-SetupDebug 'Python sign-in: AzureCliCredential (set AZURE_TOKEN_CREDENTIALS to override).'
+}
 if ($Stage -ne 'preflight' -and -not $Yes) { throw 'Review -DryRun, then pass -Yes to authorize the selected changes.' }
 if ($IsInteractive) {
     Initialize-GatewayApplication
     $ConfigJson = $Config | ConvertTo-Json -Depth 30 -Compress | & jq -e -f (Join-Path $PSScriptRoot 'validate-config.jq')
-    if ($LASTEXITCODE -ne 0) { throw 'The generated gateway application configuration is invalid.' }
+    if ($LASTEXITCODE -ne 0) {
+        Show-ConfigRuleFailures ($Config | ConvertTo-Json -Depth 30 -Compress)
+        throw 'The generated gateway application configuration is invalid.'
+    }
     $Config = $ConfigJson | ConvertFrom-Json -AsHashtable
     if ($ConfigGenerated) {
         $TemporaryConfig = "$ConfigPath.tmp.$([Guid]::NewGuid().ToString('N').Substring(0, 6))"
@@ -462,7 +494,7 @@ try {
     if ($Stage -eq 'retention') { Set-Retention; return }
     if ($Stage -eq 'reporting') { Invoke-Reporting; return }
     Install-Prerequisites
-    $Identity = & $Config.pythonExecutable -c 'import base64,json; from azure.identity import DefaultAzureCredential; token=DefaultAzureCredential().get_token("https://management.azure.com/.default").token.split(".")[1]; claims=json.loads(base64.urlsafe_b64decode(token+"="*(-len(token)%4))); print(json.dumps({"oid":claims["oid"],"tid":claims["tid"]}))'
+    $Identity = & $Config.pythonExecutable -c 'import base64,json; from azure.identity import DefaultAzureCredential; token=DefaultAzureCredential(process_timeout=60).get_token("https://management.azure.com/.default").token.split(".")[1]; claims=json.loads(base64.urlsafe_b64decode(token+"="*(-len(token)%4))); print(json.dumps({"oid":claims["oid"],"tid":claims["tid"]}))'
     if ($LASTEXITCODE -ne 0) { throw 'Cannot check Python credential identity.' }
     $Identity = $Identity | ConvertFrom-Json -AsHashtable
     if ($Identity.tid -ne $Config.tenantId) { throw 'Python credential resolved to a different tenant than tenantId.' }
@@ -482,7 +514,14 @@ try {
     Invoke-Azure group show --name $Config.resourceGroup -o none
     Invoke-Azure group show --name $Config.foundryResourceGroup -o none
     Invoke-Azure cognitiveservices account show --name $Config.foundryAccountName --resource-group $Config.foundryResourceGroup -o none
-    if ((Invoke-Azure resource show --ids $Config.workspaceResourceId --query location -o tsv) -ne $Config.workspaceLocation) { throw 'workspaceLocation does not match the existing workspace.' }
+    $script:CurrentStep = 'Log Analytics workspace check'
+    $WorkspaceRegion = & az resource show --ids $Config.workspaceResourceId --query location -o tsv --only-show-errors 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $WorkspaceRegion) {
+        throw "Log Analytics workspace not found: $($Config.workspaceResourceId). Check the subscription, resource group and workspace name in workspaceResourceId (admin\setup.local.json), then rerun."
+    }
+    if ($WorkspaceRegion -ne $Config.workspaceLocation) {
+        throw "workspaceLocation ($($Config.workspaceLocation)) does not match the region of the existing workspace ($WorkspaceRegion)."
+    }
     $Models = @(Invoke-Azure cognitiveservices account deployment list --name $Config.foundryAccountName --resource-group $Config.foundryResourceGroup -o json | ConvertFrom-Json -AsHashtable)
     foreach ($Family in @('opus', 'sonnet', 'haiku')) {
         if (-not $Config.models[$Family]) {
@@ -559,9 +598,20 @@ try {
         foundryResourceGroup = $Config.foundryResourceGroup
         enableReconciler = $Config.options.reconcile; cosmosAccountName = $Budget.cosmosAccountName.value
     } | Out-Null
-    & $Config.pythonExecutable (Join-Path $Root 'snippets/15-load-pricing.py') --dcr-endpoint $Tiers.pricingDcrEndpoint.value `
-        --dcr-immutable-id $Tiers.pricingDcrImmutableId.value --redis-host $Budget.redisHost.value
-    if ($LASTEXITCODE -ne 0) { throw 'Price loading failed; check RBAC propagation and network access before rerunning.' }
+    # Fetch the two tokens once through Azure CLI first: the Python loader waits only about
+    # 10 seconds for Azure CLI, and the first token for a new service can take longer on Windows.
+    $script:CurrentStep = 'price loading'
+    foreach ($TokenScope in @('https://monitor.azure.com//.default', 'https://redis.azure.com/.default')) {
+        & az account get-access-token --scope $TokenScope -o none --only-show-errors 2>$null | Out-Null
+    }
+    for ($Attempt = 1; $Attempt -le 3; $Attempt++) {
+        & $Config.pythonExecutable (Join-Path $Root 'snippets/15-load-pricing.py') --dcr-endpoint $Tiers.pricingDcrEndpoint.value `
+            --dcr-immutable-id $Tiers.pricingDcrImmutableId.value --redis-host $Budget.redisHost.value
+        if ($LASTEXITCODE -eq 0) { break }
+        if ($Attempt -eq 3) { throw 'Price loading failed after 3 attempts; check the Azure CLI sign-in, RBAC propagation and network access, then rerun.' }
+        Write-Host "Price loading failed (attempt $Attempt of 3). Retrying in 60 seconds; new role assignments and sign-ins can take a few minutes."
+        Start-Sleep -Seconds 60
+    }
     $Apps = @(Invoke-Azure functionapp list --resource-group $Config.resourceGroup -o json | ConvertFrom-Json -AsHashtable)
     $ProcessorApps = @($Apps | Where-Object { $_.identity.principalId -eq $Budget.processorPrincipalId.value })
     $BudgetApps = @($Apps | Where-Object { $_.identity.principalId -eq $Budget.budgetApiPrincipalId.value })
@@ -580,7 +630,7 @@ try {
     }
     if ($Config.teamGovernance) {
         $GovernanceParameters.profiles = $Config.teamGovernance.profiles
-        $GovernanceParameters.teams = $Config.teamGovernance.teams
+        $GovernanceParameters.teams = @(Expand-AllowedModels $Config.teamGovernance.teams $Models)
         $GovernanceParameters.actionGroupIds = @($Config.teamGovernance.actionGroupIds)
     }
     $Governance = Invoke-Deployment '22-team-governance' $Config.resourceGroup 'infra/22-team-governance.bicep' $GovernanceParameters

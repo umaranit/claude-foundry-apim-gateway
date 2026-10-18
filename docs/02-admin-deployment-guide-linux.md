@@ -7,13 +7,25 @@ Complete `01-prerequisites-checklist.md` first.
 
 **Time:** about 15 minutes of preparation, then 45–60 minutes for the deployment (most of it is creating API Management).
 
-> Do not use Git Bash on Windows. The Windows versions of `az` and `jq` add hidden carriage-return characters that break the scripts.
+Each step starts with **Why**, a short explanation of what the step is for.
+
+> **Do not use Git Bash on Windows.** The Windows versions of `az` and `jq` add hidden carriage-return characters that break the scripts.
+>
+> **Placeholders:** replace every `<...>` value, including the angle brackets.
 
 ---
 
 ## Part A: Prepare the machine (one time)
 
 ### A1. Install the tools
+**Why:** the scripts call these tools.
+- **Azure CLI** signs in and creates the Azure and Entra resources.
+- **jq** reads and checks the JSON configuration; **uuidgen** creates IDs for the app roles.
+- **Python** (with `venv`) loads the model prices into Log Analytics and Redis.
+- **Azure Functions Core Tools** (`func`) publishes the code of the two Function Apps (budget API and usage processor).
+- **Bicep** compiles the Azure templates; the **quota** extension checks Function plan capacity.
+- **tmux** keeps the deployment running if your terminal disconnects.
+
 ```bash
 sudo apt update && sudo apt install -y git jq uuid-runtime python3-venv tmux curl
 curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
@@ -25,9 +37,11 @@ curl -sL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor 
 echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/microsoft-ubuntu-$(lsb_release -cs)-prod $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/dotnetdev.list
 sudo apt update && sudo apt install -y azure-functions-core-tools-4
 ```
-**On WSL:** check that `which az jq func` all show `/usr/bin/...`. A path starting with `/mnt/c/` is the Windows version; install the Linux version as above.
+**On WSL:** check that `which az jq func` all show `/usr/bin/...`. A path starting with `/mnt/c/` is the Windows version, which adds hidden characters; install the Linux version as above.
 
 ### A2. Get the repository and the Python environment
+**Why:** the repository contains the scripts, the Azure templates and the Function code. The `logs` folder keeps a record of the deployment. A Python virtual environment keeps the packages the scripts need separate from the system Python.
+
 Clone **inside Linux**. Do not copy `.sh` files from a Windows folder; Windows line endings break them.
 ```bash
 cd ~
@@ -43,82 +57,107 @@ pip install azure-identity azure-monitor-ingestion requests redis
 
 ## Part B: Prepare the subscription
 
-### B1. Sign in
+### B1. Set your values and sign in
+**Why:** every later command runs against this tenant and subscription. Setting the values once here means you do not edit placeholders in each command, which avoids typing mistakes.
+
+Fill in your values (keep the quotes), then run the block:
 ```bash
-az login --tenant <tenant-id>
-az account set --subscription <subscription-id>
+TENANT="<tenant-id>"
+SUB="<subscription-id>"
+REGION="<region>"                    # for example centralus
+RG="<resource-group>"                # gateway resource group
+WS="<workspace-name>"                # Log Analytics workspace
+FOUNDRY_RG="<foundry-resource-group>"
+FOUNDRY="<foundry-resource-name>"
+APIM="<apim-name>"                   # globally unique
+
+az login --tenant "$TENANT"
+az account set --subscription "$SUB"
 az account show --query "{tenant:tenantId, subscription:name}" -o table
 ```
+These values last only in this terminal. If you open a new one (or a new `tmux` window), run the variable lines again.
 If Conditional Access requires a managed device, use the browser sign-in (not `--use-device-code`). On WSL, if the browser does not open, copy the sign-in link from the terminal into your Windows browser.
 
 ### B2. Create the resource group and Log Analytics workspace
+**Why:** all gateway resources go into one resource group, so they are easy to find, secure and delete. The Log Analytics workspace stores the gateway logs, the usage per user and team, and the model prices; the workbooks read from it.
+
 Skip this step if they already exist (checklist items 5 and 6).
 ```bash
-RG="<resource-group>"; REGION="<region>"; WS="<workspace-name>"
 az group create -n "$RG" -l "$REGION" -o table
-az monitor log-analytics workspace create -g "$RG" -n "$WS" -l "$REGION" --query id -o tsv
+WS_ID=$(az monitor log-analytics workspace create -g "$RG" -n "$WS" -l "$REGION" --query id -o tsv)
+echo "$WS_ID"
 ```
-The last command prints the **workspace resource ID**. Keep it: preflight asks for it. To show it again later:
+The last line shows the **workspace resource ID**. Preflight (C2) asks for it. If the workspace already exists:
 ```bash
-az monitor log-analytics workspace show -g "$RG" -n "$WS" --query id -o tsv
+WS_ID=$(az monitor log-analytics workspace show -g "$RG" -n "$WS" --query id -o tsv); echo "$WS_ID"
 ```
 Use the same region for the workspace and the gateway unless your organization requires otherwise.
 
 ### B3. Check the Foundry model deployments
+**Why:** the gateway sends requests to these deployments. The setup finds the Opus, Sonnet and Haiku deployments by model name; if a model is missing or deployed twice, it cannot tell which one to use.
+
 ```bash
-az cognitiveservices account deployment list -g <foundry-rg> -n <foundry-name> \
+az cognitiveservices account deployment list -g "$FOUNDRY_RG" -n "$FOUNDRY" \
   --query "[].{deployment:name, model:properties.model.name}" -o table
 ```
-There must be **exactly one** deployment of each: Opus, Sonnet and Haiku. Deployment names can be anything; the setup detects them.
+There must be **exactly one** deployment of each: Opus, Sonnet and Haiku. Other models (for example GPT models) do not matter.
 
 ### B4. Register resource providers
+**Why:** an Azure service must be enabled ("registered") in a subscription before resources of that type can be created. New subscriptions often have some of these turned off, and the setup does not turn them on by itself.
+
 ```bash
 PROVIDERS="Microsoft.Quota Microsoft.ApiManagement Microsoft.Web Microsoft.Cache Microsoft.DocumentDB Microsoft.EventHub Microsoft.Insights Microsoft.OperationalInsights Microsoft.Storage Microsoft.Dashboard"
 for p in $PROVIDERS; do az provider register --namespace $p; done
 for p in $PROVIDERS; do echo "$p: $(az provider show -n $p --query registrationState -o tsv)"; done
 ```
-Repeat the second loop until every provider shows `Registered`.
+Repeat the second loop until every provider shows `Registered` (usually 1–3 minutes).
 
 ### B5. Check EP1 quota
+**Why:** the budget API and usage processor run on an Elastic Premium (EP1) Function plan with 2 always-ready instances, so they answer quickly without start-up delays. If the subscription does not have 2 free EP1 instances in the region, the deployment fails partway through.
+
 ```bash
-SCOPE="/subscriptions/<subscription-id>/providers/Microsoft.Web/locations/<region>"
+SCOPE="/subscriptions/$SUB/providers/Microsoft.Web/locations/$REGION"
 az quota show --resource-name EP1 --scope "$SCOPE" --query "properties.limit.value" -o tsv
 az quota usage show --resource-name EP1 --scope "$SCOPE" --query "properties.usages.value" -o tsv
 ```
-The limit minus the usage must be **2 or more**. If not, request more quota or choose another region.
+The first number (limit) minus the second (usage) must be **2 or more**. If not, request more quota or choose another region.
 
 ---
 
 ## Part C: Deploy
 
 ### C1. Create the gateway app with all roles
+**Why:** this Entra app registration represents the gateway API. Users get their sign-in token **for this app**, and its roles decide who may use the gateway (`Claude.User`), which per-user tier applies (`Claude.Tier.*`), and who is blocked (`Claude.Suspended`). Creating it first makes sure all four roles exist; the setup in C2 reuses it by name.
+
 ```bash
-./admin/create-claude-gateway-app.sh --tenant-id <tenant-id> --display-name "Claude Gateway - <apim-name>" --dry-run
-./admin/create-claude-gateway-app.sh --tenant-id <tenant-id> --display-name "Claude Gateway - <apim-name>" --yes
+./admin/create-claude-gateway-app.sh --tenant-id "$TENANT" --display-name "Claude Gateway - $APIM" --dry-run
+./admin/create-claude-gateway-app.sh --tenant-id "$TENANT" --display-name "Claude Gateway - $APIM" --yes
 ```
-The output lists the roles `Claude.User`, `Claude.Tier.Pro`, `Claude.Tier.Basic` and `Claude.Suspended`. Note the `gatewayAudience` value (the app ID).
+The first command shows the plan only. The second creates the app; its output lists the roles `Claude.User`, `Claude.Tier.Pro`, `Claude.Tier.Basic` and `Claude.Suspended`.
 
 ### C2. Preflight (asks questions, saves the answers, deploys nothing)
+**Why:** collects all settings and saves them to `admin/setup.local.json`, so the deployment can be repeated with exactly the same values. It also checks, before anything is deployed, that you can reach Azure and Entra, that the models and workspace exist, that there is enough quota, and that the templates compile. It updates the gateway app from C1 (it does not create Azure resources).
+
 ```bash
 ./admin/claude-gateway-setup.sh --interactive --stage preflight
 ```
 
 | Question | Answer |
 |---|---|
-| Subscription ID, Tenant ID | The GUIDs |
+| Subscription ID, Tenant ID | The values of `$SUB` and `$TENANT` from B1 |
 | Publisher name | Press Enter, or your team name |
-| Resource group name | The gateway resource group |
-| Foundry resource group name | The resource group of the Foundry resource |
-| APIM name | Your chosen name |
-| APIM location | Region for APIM and the budget platform |
-| Workspace location | The **existing** workspace's region |
-| Workbook location | Region for the workbook |
+| Resource group name | `$RG` |
+| Foundry resource group name | `$FOUNDRY_RG` |
+| APIM name | `$APIM` |
+| APIM location | `$REGION` (also used for the budget platform) |
+| Workspace location | The workspace's region (`$REGION` if created in B2) |
+| Workbook location | `$REGION` |
 | Publisher email | Admin email |
-| Gateway service principal name | **The same name as in C1** (the default suggestion matches) |
-| Log Analytics workspace resource ID | The full resource ID |
-| Foundry resource name | The Foundry resource |
-| Resource name prefix | 3–11 lowercase letters or digits |
-| Configure team governance now? | `yes`, then the team details from the checklist. The team governance mode is `enforce` by default (see C3/C4 to change it). |
+| Gateway service principal name | Press Enter: the default is the C1 name, "Claude Gateway - `$APIM`" |
+| Log Analytics workspace resource ID | The workspace resource ID shown in B2 |
+| Foundry resource name | `$FOUNDRY` |
+| Resource name prefix | 3–11 lowercase letters or digits (used in the names of the budget platform resources) |
+| Configure team governance now? | `yes`, then the team details from the checklist. Each person may be in only one team. The team governance mode is `enforce` by default (see C3 to change it). |
 
 Team member sign-in names are entered comma-separated, without spaces.
 
@@ -128,33 +167,52 @@ Saved interactive configuration to .../admin/setup.local.json.
 Preflight passed; ... no Azure resource deployments were made.
 ```
 
-### C3. Review the saved configuration
+**If preflight stops with an error:** your answers are already saved, and the next interactive run offers them as defaults in `[...]`. Check every default, or correct the saved file and rerun preflight without the questions. For example, to correct the workspace ID:
 ```bash
-jq '{resourceGroup, apimName, namePrefix, gatewayAudience, pythonExecutable}' admin/setup.local.json
+jq --arg w "<correct-workspace-resource-id>" '.workspaceResourceId=$w' admin/setup.local.json > /tmp/setup.json && mv /tmp/setup.json admin/setup.local.json
+./admin/claude-gateway-setup.sh --config admin/setup.local.json --non-interactive --stage preflight
 ```
-Set the Python path and confirm that the prices are reviewed:
+
+### C3. Review the saved configuration
+**Why:** this is the last check before resources are created. `pricesReviewed` is a safety switch: the deployment stops until you confirm that the model prices in `snippets/15-load-pricing.py` match your Azure agreement, because budgets are calculated from them. The Python path tells the scripts which Python has the packages from A2. The validation at the end catches mistakes from manual edits.
+
+**1. Set the Python path and confirm that the prices are reviewed** (required):
 ```bash
 jq --arg p "$HOME/claude-venv/bin/python" '.pythonExecutable=$p | .options.pricesReviewed=true' \
   admin/setup.local.json > /tmp/setup.json && mv /tmp/setup.json admin/setup.local.json
 ```
-**Team governance mode.** The default is `enforce`. To start in `observe` instead:
+
+**2. Only if you want to start in `observe` mode** (skip this to keep the default, `enforce`):
 ```bash
 jq '.teamGovernance.mode="observe"' admin/setup.local.json > /tmp/setup.json && mv /tmp/setup.json admin/setup.local.json
 ```
 In `enforce` mode every user must be in exactly one team, and each team can use only its allowed models.
 
-**Optional: Grafana.** Use the admin's **user object ID in this tenant**:
+**3. Only if you want Grafana** (skip this otherwise). Replace the two `<...>` values first; the admin object ID is the admin's **user object ID in this tenant**:
 ```bash
-jq --arg n "<prefix>-grafana" --arg l "<region>" --arg a "<admin-user-object-id>" \
+jq --arg n "<prefix>-grafana" --arg l "$REGION" --arg a "<admin-user-object-id>" \
   '.options.grafana=true | .grafanaName=$n | .grafanaLocation=$l | .grafanaAdminPrincipalId=$a' \
   admin/setup.local.json > /tmp/setup.json && mv /tmp/setup.json admin/setup.local.json
 ```
-Validate:
+
+**4. Check the settings and validate** (required):
 ```bash
+jq '{resourceGroup, apimName, namePrefix, workspaceResourceId, gatewayAudience, pythonExecutable, mode: .teamGovernance.mode, grafana: .options.grafana, pricesReviewed: .options.pricesReviewed}' admin/setup.local.json
+jq '.teamGovernance.teams[] | {id, profile, defaultUserTier, allowedModels, members}' admin/setup.local.json
 jq -e -f admin/validate-config.jq admin/setup.local.json > /dev/null && echo "Config OK"
 ```
+Check that the resource group and the workspace ID belong to this deployment, the mode is what you want, `grafana` is `false` unless you chose step 3, `pricesReviewed` is `true`, and the result is `Config OK`. If you ran step 2 or 3 by mistake, run them again with the values you want (for example `"enforce"`, or `.options.grafana=false`).
 
 ### C4. Deploy (45–60 minutes)
+**Why:** creates everything in the right order, because later parts need outputs from earlier ones:
+1. API Management (first without its policy, to get its managed identity)
+2. Tier and pricing data in Log Analytics
+3. The budget platform: Event Hub, Redis, Cosmos DB, storage and the two Function Apps
+4. Loads the model prices and publishes the Function code
+5. Team groups, members and roles in Entra, and the team settings in the gateway
+6. The final APIM policy (sign-in check, limits, budget check, call to Foundry)
+7. The client settings file for developers, and the workbook
+
 Run inside `tmux` so a dropped connection does not stop the deployment. Keep the machine awake.
 ```bash
 tmux new -s claude
@@ -165,26 +223,37 @@ cd ~/claude-foundry-apim-gateway
 ```
 If the terminal disconnects, reconnect and run `tmux attach -t claude`.
 Expected last line: `Selected steps completed. ...`
-The deployment is safe to repeat with the **same names**. It creates API Management only if it does not exist.
+
+**If it stops:** read the end of the log, fix the cause (see the operations guide, Troubleshooting), sign in again if needed (for example after the machine slept: `ExpiredAuthenticationToken`), and run the **same command** again. Existing resources are reused, so a rerun continues where it stopped.
+```bash
+tail -30 logs/claude-gateway-setup.log
+az login --tenant "$TENANT" && az account set --subscription "$SUB"
+```
 
 ---
 
 ## Part D: Verify
 
 ### D1. Deployments and Entra objects
+**Why:** confirms that each part was deployed, and that the Entra groups, members and roles match the configuration.
+
 ```bash
-az deployment group list -g <resource-group> --query "[].{name:name, state:properties.provisioningState}" -o table
+az deployment group list -g "$RG" --query "[].{name:name, state:properties.provisioningState}" -o table
 ./admin/setup-teams-governance-claude-gateway.sh --config admin/setup.local.json --check
 az ad app show --id "$(jq -r .gatewayAudience admin/setup.local.json)" --query "appRoles[].value" -o tsv
 ```
-- `04-apim-gateway`, `14-claude-tiers`, `16-budget-platform`, `22-team-governance` and `09-workbook` show **Succeeded**. A failed `Failure-Anomalies-Alert-Rule` deployment is added by Azure and can be ignored.
+- `04-apim-gateway`, `14-claude-tiers`, `16-budget-platform`, `22-team-governance` and `09-workbook` show **Succeeded**. A failed `Failure-Anomalies-Alert-Rule` deployment is added by Azure and can be ignored. `PolicyDeployment_...` entries come from your organization's Azure Policy, not from this setup.
 - The governance check ends with `Team governance reconciliation complete`.
 - The roles include `Claude.User`, the tier roles and the team and profile roles.
 
 ### D2. Allow developers to sign in with Azure CLI
-Do this once, unless an Entra admin has granted consent instead. See the operations guide, "Allow Azure CLI to request gateway tokens".
+**Why:** Claude Code (CLI and VS Code) gets its gateway token through Azure CLI. Many organizations do not let users approve this themselves ("Need admin approval"). Pre-approving Azure CLI once avoids that for every developer.
+
+See the operations guide, "Allow Azure CLI to request gateway tokens". Skip this if an Entra admin has granted consent instead.
 
 ### D3. End-to-end test as a user
+**Why:** proves the whole path works: sign-in, role check, API Management, budget check and Foundry. The first test call has no token and must be rejected (401); the second, with your token, must succeed (200).
+
 Use an account that is in a team (it then has the `Claude.User` role):
 ```bash
 bash developer/setup-claude-workstation.sh --config developer/claude-client-configuration.json --dry-run
@@ -194,6 +263,8 @@ Expected: `Smoke tests passed: unauthenticated 401; authenticated inference 200.
 `--test-only` changes no settings and makes one small billable request.
 
 ### D4. Team governance checks (enforce mode)
+**Why:** proves that the `enforce` rules block what they should, before your users rely on them.
+
 Run these with real users after the smoke test (each makes at most one small billable request):
 
 | Test | Expected |
@@ -202,7 +273,9 @@ Run these with real users after the smoke test (each makes at most one small bil
 | Team member calls a model **not** in the team's `allowedModels` | 403 with header `x-claude-denied-by: team-model-policy` |
 | User with `Claude.User` but in no team | 403 with header `x-claude-denied-by: identity` |
 
-To see the denial reason, call the gateway with a token (replace the model name):
+Each team's allowed models also cover their Foundry deployments, whatever the deployment names are (for example `claude-sonnet-5-apim` counts as `claude-sonnet-5`). The setup looks the names up each time it deploys the team settings.
+
+To see the result, call the gateway with a token (replace the model name with a deployment name from B3):
 ```bash
 CFG=developer/claude-client-configuration.json
 RES=$(jq -r '.gatewaySso.scopes' $CFG | tr ' ' '\n' | grep '^api://' | sed 's#/[^/]*$##')
@@ -214,11 +287,14 @@ curl -s -o /dev/null -D - "$(jq -r .gatewayUrl $CFG)/v1/messages" \
 ```
 
 ### D5. Usage tracking
+**Why:** proves that usage events reach Log Analytics and that cost is attributed to the right user and team, which the budgets depend on.
+
 After 5–15 minutes, open the Log Analytics workspace > **Workbooks** > **Claude team governance**. The test calls appear under the team and the user, with tokens and estimated cost.
 
 ### D6. Hand over to developers
-Give developers:
-- `developer/claude-client-configuration.json` (contains no secrets)
+**Why:** developers need only these files; they contain no secrets and no Azure resource details.
+
+- `developer/claude-client-configuration.json`
 - `developer/setup-claude-workstation.sh` and `developer/setup-claude-workstation.ps1`
 - `04-developer-onboarding-guide.md`
 

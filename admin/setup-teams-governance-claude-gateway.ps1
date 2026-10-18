@@ -50,6 +50,18 @@ function Invoke-GraphWrite([string]$Method, [string]$Url, [string]$Json) {
 
 function ConvertTo-ODataLiteral([string]$Value) { return $Value.Replace("'", "''") }
 
+function Expand-AllowedModels($Teams, $Deployments) {
+    # Adds each allowed model's Foundry deployment names (for example claude-sonnet-5-apim)
+    # to the team's allowedModels, because clients send the deployment name.
+    $DeploymentsFile = [IO.Path]::GetTempFileName()
+    try {
+        ConvertTo-Json -InputObject @($Deployments) -Depth 30 -Compress | Set-Content -LiteralPath $DeploymentsFile -Encoding utf8NoBOM
+        $Expanded = ConvertTo-Json -InputObject @($Teams) -Depth 30 -Compress |
+            & jq -c --slurpfile deps $DeploymentsFile -f (Join-Path $PSScriptRoot 'expand-allowed-models.jq')
+        if ($LASTEXITCODE -ne 0) { throw 'Could not map the allowed models to Foundry deployment names.' }
+        return @(($Expanded -join "`n") | ConvertFrom-Json -AsHashtable)
+    } finally { Remove-Item -LiteralPath $DeploymentsFile -Force -ErrorAction SilentlyContinue }
+}
 function Invoke-GovernanceDeployment {
     $Parameters = @{
         apimName = $Config.apimName
@@ -61,7 +73,9 @@ function Invoke-GovernanceDeployment {
     }
     if ($Config.teamGovernance) {
         $Parameters.profiles = $Config.teamGovernance.profiles
-        $Parameters.teams = $Config.teamGovernance.teams
+        $FoundryGroup = if ($Config.foundryResourceGroup) { $Config.foundryResourceGroup } else { $Config.resourceGroup }
+        $Deployments = @(Invoke-Azure cognitiveservices account deployment list --name $Config.foundryAccountName --resource-group $FoundryGroup -o json | ConvertFrom-Json -AsHashtable)
+        $Parameters.teams = @(Expand-AllowedModels $Config.teamGovernance.teams $Deployments)
     }
     $ParameterFile = [IO.Path]::GetTempFileName()
     try {

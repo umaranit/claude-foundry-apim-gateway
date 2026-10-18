@@ -33,6 +33,7 @@ The gateway scope is already pre-authorized for the Desktop app. If users still 
 - The group is assigned the roles `Claude.User`, the team role, the team-profile role (`Claude.TeamProfile.Regular` or `Claude.TeamProfile.Power`) and the default user tier role (`Claude.Tier.Pro`, `Claude.Tier.Basic` or `Claude.Tier.Lite`).
 - Usage is attributed to the user and the team, and shown in the **Claude team governance** workbook.
 - A user can belong to only one team.
+- A team's `allowedModels` use the model names (`claude-sonnet-5`, `claude-haiku-4-5`, `claude-opus-5`). The setup adds the matching Foundry deployment names automatically, so deployments can have any name. If you add or rename a deployment in Foundry, run the governance script with `--yes` / `-Yes` again so the gateway learns the new name.
 
 ### Check the current state (read-only)
 ```bash
@@ -187,7 +188,9 @@ Some dashboards use the hourly summary table; to create it, also set `options.su
 
 | Message | Cause | Fix |
 |---|---|---|
-| `Invalid admin config` | An answer or setting breaks a rule | Check the configuration with `jq -f admin/validate-config-check.jq admin/setup.local.json`; each rule shows `true` or `false`. With PowerShell, rejected interactive answers are also saved to `admin/setup.rejected.json`. |
+| `Invalid admin config` | An answer or setting breaks a rule | The script lists the failing rules under "Configuration rules that failed", with the values that caused them. In interactive mode the answers are saved to `admin/setup.rejected.json`. To check a file yourself: `jq -f admin/validate-config-check.jq admin/setup.local.json` (rules with `"ok": false` failed). Common cause: the same user in two teams. |
+| `The system cannot find the file specified` (Windows) | A `<...>` placeholder was left in a command; Windows reads `<` as "read from a file" | Replace every placeholder, including the angle brackets (or set the values once, as in deployment guide step B1) |
+| Script fails to start: "requires ... version 7" or `Unexpected token '??'` | Running in Windows PowerShell 5.1 or Command Prompt | Open PowerShell 7 (`pwsh`) |
 | `uuidgen is required`, or `Invalid admin config` with correct answers, in Git Bash | Windows tools add hidden characters | Use Linux/WSL, or PowerShell 7 |
 | `No module named 'azure'` | `pythonExecutable` points to a Python without the packages | Set it to the virtual environment's Python |
 | `pythonExecutable ... is not a working Python 3` (PowerShell) | Microsoft Store placeholder | Install Python and use the venv path |
@@ -198,7 +201,14 @@ Some dashboards use the hourly summary table; to create it, also set `options.su
 | `Review PRICES ... pricesReviewed=true` | Safety stop | Review the prices, then set `options.pricesReviewed` to `true` |
 | `Wrong Azure tenant` | Azure CLI signed in to another tenant | `az login --tenant <tenant-id>` |
 | AADSTS `530033` at sign-in | Conditional Access requires a managed device | Sign in with the browser from a managed device, not a device code |
-| Price loading or permission errors on the first run | Role assignments are still propagating | Wait a few minutes and re-run with the same names |
+| `Price loading failed after 3 attempts` | Role assignments still propagating, or Azure CLI too slow to answer (Python waits about 10 seconds; seen on Windows) | The setup already retries. Wait a few minutes, run `az account get-access-token --scope https://redis.azure.com/.default -o none`, then re-run with the same names |
+| `AzureCliCredential: Failed to invoke the Azure CLI` | Azure CLI took too long to return a token | As above |
+| `Python credential resolved to a different tenant than tenantId` | Python used a cached Windows/Office account from another tenant | Current scripts set `AZURE_TOKEN_CREDENTIALS=AzureCliCredential` automatically. With an older script, run `$env:AZURE_TOKEN_CREDENTIALS = "AzureCliCredential"` (PowerShell) or `export AZURE_TOKEN_CREDENTIALS=AzureCliCredential` (Bash), then re-run |
+| `ExpiredAuthenticationToken` | The computer slept or the sign-in expired during a long run | `az login --tenant <tenant-id>`, `az account set --subscription <subscription-id>`, then re-run the same command |
+| Window shows no output; the log has no new lines | Windows paused the program (text selected in the window), or another window holds the log file open (`Get-Content -Wait`) | Press **Esc**. If nothing happens, press Ctrl+C, close other windows reading the log, and re-run with a new `-LogFile` name |
+| `Log Analytics workspace not found` | Wrong subscription, resource group or name in `workspaceResourceId` | Correct it in `admin/setup.local.json` and re-run preflight |
+| 403 `team-model-policy` for an allowed model | The gateway does not know a deployment name (added after the last deployment, or an older script was used) | Run the governance script with `--yes` / `-Yes` again |
+| `PolicyDeployment_...` entries in the deployment list | Your organization's Azure Policy | Not part of this setup; no action |
 | Deployment stopped (closed terminal, lost session) | The run was interrupted | Re-run the same command; existing resources are reused |
 | "Need admin approval – Microsoft Azure CLI" (developers) | Azure CLI not authorized on the gateway API | Section 1 |
 | Desktop `invalid_client` | Wrong Scopes, Client ID or Issuer URL in Desktop | Developer guide, Part 2 |

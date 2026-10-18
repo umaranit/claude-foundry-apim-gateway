@@ -97,14 +97,20 @@ if [[ "$CHECK" != true && "$YES" != true ]]; then
 fi
 
 deploy_governance() {
-  local parameter_file=$TEMP/22-team-governance.parameters.json result
+  local parameter_file=$TEMP/22-team-governance.parameters.json result teams_json
+  teams_json=$(jq -c '.teamGovernance.teams // null' <<< "$CONFIG")
+  if [[ "$teams_json" != null ]]; then
+    azure cognitiveservices account deployment list --name "$(value .foundryAccountName)" \
+      --resource-group "$(jq -r '.foundryResourceGroup // .resourceGroup' <<< "$CONFIG")" -o json > "$TEMP/foundry-deployments.json"
+    teams_json=$(jq -c --slurpfile deps "$TEMP/foundry-deployments.json" -f "$ROOT/admin/expand-allowed-models.jq" <<< "$teams_json")
+  fi
   jq -n --arg apimName "$(value .apimName)" \
     --arg workspaceId "$(value .workspaceResourceId)" \
     --arg workspaceName "$(jq -er '.workspaceResourceId | split("/")[-1]' <<< "$CONFIG")" \
     --arg workbookLocation "$(value .workbookLocation)" \
     --arg mode "$MODE" \
     --argjson profiles "$(jq -c '.teamGovernance.profiles // null' <<< "$CONFIG")" \
-    --argjson teams "$(jq -c '.teamGovernance.teams // null' <<< "$CONFIG")" \
+    --argjson teams "$teams_json" \
     --argjson actionGroupIds "$(jq -c '.teamGovernance.actionGroupIds // []' <<< "$CONFIG")" '
       {
         apimName: {value: $apimName},
