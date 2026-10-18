@@ -25,7 +25,7 @@ if ([.subscriptionId, .tenantId, .gatewayAudience] | all(.[]; guid)) and
   ([.options.registerProviders, .options.checkEp1Quota, .options.pricesReviewed, .options.workbook,
     .options.summaryRule, .options.grafana, .options.reconcile, .options.smokeTest] | all(.[]; type == "boolean")) and
   (if .options.grafana then (.grafanaName | type == "string" and length > 0) and
-    (.grafanaLocation | type == "string" and length > 0) and (.grafanaAdminPrincipalId | guid) else true end) and
+    (.grafanaLocation | type == "string" and length > 0) and ((.grafanaAdminPrincipalId // "") == "" or (.grafanaAdminPrincipalId | guid)) else true end) and
   (if .teamGovernance == null then true else
     (.teamGovernance.mode as $mode | ($mode == "off" or $mode == "observe" or $mode == "enforce")) and
     ((.teamGovernance.actionGroupIds // []) | type == "array" and uniqueBy(.) and

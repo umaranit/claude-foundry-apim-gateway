@@ -170,35 +170,63 @@ function Read-SetupModels {
 function ConvertTo-TeamId([string]$Name) {
     return (($Name.ToLowerInvariant() -replace '[^a-z0-9]+', '-') -replace '^-+|-+$', '')
 }
+function Get-SessionValue([string]$Name) {
+    # Values set in the deployment guide's step B1 ($Tenant, $Sub, $Rg, ...) are offered as defaults.
+    $Variable = Get-Variable -Name $Name -Scope Global -ErrorAction SilentlyContinue
+    if ($Variable -and $Variable.Value -and "$($Variable.Value)" -notmatch '[<>]') { return "$($Variable.Value)" }
+    return ''
+}
+function Get-SetupDefault($ConfigValue, [string]$SessionName, [string]$Fallback = '') {
+    if ($ConfigValue -and "$ConfigValue" -notmatch '[<>]') { return "$ConfigValue" }
+    $Value = if ($SessionName) { Get-SessionValue $SessionName } else { '' }
+    if ($Value) { return $Value }
+    return $Fallback
+}
 function Initialize-InteractiveConfig {
     $GuidPattern = '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$'
     if ($ConfigGenerated -or "$($Config.subscriptionId)" -notmatch $GuidPattern -or "$($Config.tenantId)" -notmatch $GuidPattern) {
-        $SubscriptionDefault = if ("$($Config.subscriptionId)" -match $GuidPattern) { $Config.subscriptionId } else { '' }
-        $TenantDefault = if ("$($Config.tenantId)" -match $GuidPattern) { $Config.tenantId } else { '' }
+        # Defaults: saved config, then step B1 values, then the current Azure CLI sign-in (read locally).
+        $CliAccount = $null
+        if (Get-Command az -ErrorAction SilentlyContinue) {
+            $CliAccountJson = & az account show -o json --only-show-errors 2>$null
+            if ($LASTEXITCODE -eq 0 -and $CliAccountJson) { $CliAccount = ($CliAccountJson -join "`n") | ConvertFrom-Json }
+        }
+        $SubscriptionDefault = if ("$($Config.subscriptionId)" -match $GuidPattern) { $Config.subscriptionId } else { Get-SetupDefault '' 'Sub' "$($CliAccount.id)" }
+        $TenantDefault = if ("$($Config.tenantId)" -match $GuidPattern) { $Config.tenantId } else { Get-SetupDefault '' 'Tenant' "$($CliAccount.tenantId)" }
+        if ("$SubscriptionDefault" -notmatch $GuidPattern) { $SubscriptionDefault = '' }
+        if ("$TenantDefault" -notmatch $GuidPattern) { $TenantDefault = '' }
         $PublisherDefault = if ($Config.publisherName) { $Config.publisherName } else { 'Platform Engineering' }
         $Config.subscriptionId = Read-SetupMatching 'Subscription ID' $SubscriptionDefault $GuidPattern 'Enter the subscription ID as a GUID.'
         $Config.tenantId = Read-SetupMatching 'Tenant ID' $TenantDefault $GuidPattern 'Enter the tenant ID as a GUID.'
         $Config.publisherName = Read-SetupValue 'Publisher name' $PublisherDefault
     }
-    $Config.resourceGroup = Read-SetupValue 'Gateway resource group name' $Config.resourceGroup
-    $Config.foundryResourceGroup = Read-SetupValue 'Foundry resource group name' ($Config.foundryResourceGroup ?? $Config.resourceGroup)
-    $Config.apimName = Read-SetupValue 'APIM name' $Config.apimName
-    $Config.apimLocation = Read-SetupValue 'APIM location' 'centralus'
+    $RegionDefault = Get-SetupDefault $Config.apimLocation 'Region' 'centralus'
+    $Config.resourceGroup = Read-SetupValue 'Gateway resource group name' (Get-SetupDefault $Config.resourceGroup 'Rg')
+    $Config.foundryResourceGroup = Read-SetupValue 'Foundry resource group name' (Get-SetupDefault $Config.foundryResourceGroup 'FoundryRg' $Config.resourceGroup)
+    $Config.apimName = Read-SetupValue 'APIM name' (Get-SetupDefault $Config.apimName 'Apim')
+    $Config.apimLocation = Read-SetupValue 'APIM location' $RegionDefault
     $Config.budgetLocation = $Config.apimLocation
     $Config.cosmosLocation = $Config.apimLocation
-    $Config.workspaceLocation = Read-SetupValue 'Workspace location' 'centralus'
-    $Config.workbookLocation = Read-SetupValue 'Workbook location' 'centralus'
-    $Config.publisherEmail = Read-SetupValue 'Publisher email' $Config.publisherEmail
+    $Config.workspaceLocation = Read-SetupValue 'Workspace location' (Get-SetupDefault $Config.workspaceLocation 'Region' $Config.apimLocation)
+    $Config.workbookLocation = Read-SetupValue 'Workbook location' (Get-SetupDefault $Config.workbookLocation 'Region' $Config.apimLocation)
+    $EmailDefault = Get-SetupDefault $Config.publisherEmail ''
+    if (-not $EmailDefault) {
+        $SignedIn = & az account show --query user.name -o tsv --only-show-errors 2>$null
+        if ($LASTEXITCODE -eq 0 -and "$SignedIn" -match '@' -and "$SignedIn" -notmatch '#EXT#') { $EmailDefault = "$SignedIn" }
+    }
+    $Config.publisherEmail = Read-SetupValue 'Publisher email' $EmailDefault
     $GatewayDisplayName = if ($Config.gatewayDisplayName) { $Config.gatewayDisplayName } else { "Claude Gateway - $($Config.apimName)" }
     $Config.gatewayDisplayName = Read-SetupValue 'Enter a name for the gateway service principal' $GatewayDisplayName
     $Config.budgetApiAudience = ''
-    $Config.workspaceResourceId = Read-SetupMatching 'Log Analytics workspace resource ID' $Config.workspaceResourceId `
+    $Config.workspaceResourceId = Read-SetupMatching 'Log Analytics workspace resource ID' (Get-SetupDefault $Config.workspaceResourceId 'WsId') `
         "^/subscriptions/$([regex]::Escape($Config.subscriptionId))/resourceGroups/[^/]+/providers/Microsoft\.OperationalInsights/workspaces/[^/]+$" `
         "Enter the full Log Analytics workspace resource ID from subscription $($Config.subscriptionId)."
-    $Config.foundryAccountName = Read-SetupValue 'Foundry resource name' $Config.foundryAccountName
-    $Config.namePrefix = Read-SetupMatching 'Resource name prefix' $Config.namePrefix '^[a-z0-9]{3,11}$' 'Use 3-11 lowercase letters or digits.'
+    $Config.foundryAccountName = Read-SetupValue 'Foundry resource name' (Get-SetupDefault $Config.foundryAccountName 'Foundry')
+    $Config.namePrefix = Read-SetupMatching 'Resource name prefix' (Get-SetupDefault $Config.namePrefix 'Prefix') '^[a-z0-9]{3,11}$' 'Use 3-11 lowercase letters or digits.'
     $PythonDefault = if ($Config.pythonExecutable) { $Config.pythonExecutable } else { 'python3' }
-    if ($IsWindows -and $PythonDefault -eq 'python3') { $PythonDefault = 'python' }
+    $VenvPython = if ($IsWindows) { Join-Path $HOME 'claude-venv-win\Scripts\python.exe' } else { Join-Path $HOME 'claude-venv/bin/python' }
+    if ($PythonDefault -in @('python', 'python3') -and (Test-Path -LiteralPath $VenvPython)) { $PythonDefault = $VenvPython }
+    elseif ($IsWindows -and $PythonDefault -eq 'python3') { $PythonDefault = 'python' }
     $Config.pythonExecutable = Read-SetupValue 'Python executable (missing loader packages are installed into it)' $PythonDefault
 
     if ((Read-SetupChoice 'Configure team governance now?' 'yes' @('yes', 'no')) -eq 'yes') {
@@ -329,8 +357,16 @@ function Initialize-ClaudeDesktopClient {
     }
     $ServicePrincipals = @(Invoke-Azure ad sp list --filter "appId eq '$ClientId'" -o json | ConvertFrom-Json -AsHashtable)
     if ($ServicePrincipals.Count -eq 0) { Invoke-Azure ad sp create --id $ClientId -o none | Out-Null }
-    $PreAuthorizedApplications = @($App.api.preAuthorizedApplications | Where-Object { $_.appId -ne $ClientId })
+    # Pre-authorize the Claude Desktop client and, unless options.preAuthorizeAzureCli is false, Azure CLI
+    # (used by Claude Code CLI / VS Code), so developers are not asked for admin consent.
+    $AzureCliAppId = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'
+    $PreAuthorizeCli = $Config.options.preAuthorizeAzureCli -ne $false
+    $PreAuthorizedApplications = @($App.api.preAuthorizedApplications | Where-Object { $_.appId -ne $ClientId -and $_.appId -ne $App.appId -and (-not $PreAuthorizeCli -or $_.appId -ne $AzureCliAppId) })
     $PreAuthorizedApplications += @{ appId = $ClientId; delegatedPermissionIds = @($Scope[0].id) }
+    if ($PreAuthorizeCli) {
+        $PreAuthorizedApplications += @{ appId = $AzureCliAppId; delegatedPermissionIds = @($Scope[0].id) }
+        Write-Host 'Azure CLI pre-authorized on the gateway API (for Claude Code CLI and VS Code).'
+    }
     $App.api.preAuthorizedApplications = $PreAuthorizedApplications
     $Body = @{ api = $App.api } | ConvertTo-Json -Depth 30 -Compress
     Invoke-GraphPatch "https://graph.microsoft.com/v1.0/applications/$($App.id)" $Body
@@ -371,6 +407,11 @@ function Invoke-Reporting {
         Set-Retention
     }
     if ($Config.options.grafana) {
+        if (-not $Config.grafanaAdminPrincipalId) {
+            $Config.grafanaAdminPrincipalId = Invoke-Azure ad signed-in-user show --query id -o tsv
+            if (-not $Config.grafanaAdminPrincipalId) { throw 'grafanaAdminPrincipalId is empty and the signed-in user could not be read; set it to the Grafana admin user object ID.' }
+            Write-Host "Grafana admin: signed-in user ($($Config.grafanaAdminPrincipalId))."
+        }
         Invoke-Deployment '11-grafana' $Config.resourceGroup 'infra/11-grafana.bicep' @{
             grafanaName = $Config.grafanaName; location = $Config.grafanaLocation
             logAnalyticsWorkspaceId = $Config.workspaceResourceId; adminPrincipalId = $Config.grafanaAdminPrincipalId

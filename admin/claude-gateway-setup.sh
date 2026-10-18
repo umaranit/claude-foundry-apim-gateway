@@ -132,12 +132,25 @@ explain_invalid_config() {
   fi
 }
 slug() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g'; }
+setup_default() {
+  # Saved config value (unless it is a <placeholder>), then an exported step B1 variable, then a fallback.
+  local config_value=$1 env_name=$2 fallback=${3:-} env_value=''
+  if [[ -n "$config_value" && "$config_value" != *'<'* && "$config_value" != *'>'* ]]; then printf '%s' "$config_value"; return; fi
+  if [[ -n "$env_name" ]]; then env_value=${!env_name:-}; fi
+  if [[ -n "$env_value" && "$env_value" != *'<'* ]]; then printf '%s' "$env_value"; return; fi
+  printf '%s' "$fallback"
+}
 configure_interactively() {
   local subscription_id tenant_id publisher_name resource_group foundry_resource_group apim_name apim_location workspace_location workbook_location publisher_email gateway_display_name workspace_id foundry_name name_prefix
   local add_teams team_name emails profile tier role team_id group_display members allowed_models team=''
+  local cli_sub='' cli_tenant=''
+  if command -v az >/dev/null 2>&1; then
+    cli_sub=$(az account show --query id -o tsv --only-show-errors 2>/dev/null || true)
+    cli_tenant=$(az account show --query tenantId -o tsv --only-show-errors 2>/dev/null || true)
+  fi
   if [[ "$CONFIG_GENERATED" == true ]]; then
-    subscription_id=$(prompt_value 'Subscription ID' "$(jq -r '.subscriptionId // empty | select(test("^[0-9a-fA-F-]{36}$"))' <<< "$CONFIG")")
-    tenant_id=$(prompt_value 'Tenant ID' "$(jq -r '.tenantId // empty | select(test("^[0-9a-fA-F-]{36}$"))' <<< "$CONFIG")")
+    subscription_id=$(prompt_value 'Subscription ID' "$(setup_default "$(jq -r '.subscriptionId // empty | select(test("^[0-9a-fA-F-]{36}$"))' <<< "$CONFIG")" SUB "$cli_sub")")
+    tenant_id=$(prompt_value 'Tenant ID' "$(setup_default "$(jq -r '.tenantId // empty | select(test("^[0-9a-fA-F-]{36}$"))' <<< "$CONFIG")" TENANT "$cli_tenant")")
     publisher_name=$(prompt_value 'Publisher name' "$(jq -r '.publisherName // "Platform Engineering"' <<< "$CONFIG")")
     CONFIG=$(jq -c --arg subscription "$subscription_id" --arg tenant "$tenant_id" --arg publisher "$publisher_name" '
       .subscriptionId = $subscription | .tenantId = $tenant |
@@ -146,19 +159,22 @@ configure_interactively() {
   # pricingPublisherPrincipalId/Type are auto-detected during preflight from the
   # active Python DefaultAzureCredential; leave unset unless pinning a specific value.
   subscription_id=${subscription_id:-$(jq -r '.subscriptionId' <<< "$CONFIG")}
-  resource_group=$(prompt_value 'Resource group name' "$(jq -r '.resourceGroup // empty' <<< "$CONFIG")")
-  foundry_resource_group=$(prompt_value 'Foundry resource group name' "$(jq -r '.foundryResourceGroup // .resourceGroup // empty' <<< "$CONFIG")")
-  apim_name=$(prompt_value 'APIM name' "$(jq -r '.apimName // empty' <<< "$CONFIG")")
-  apim_location=$(prompt_value 'APIM location' 'centralus')
-  workspace_location=$(prompt_value 'Workspace location' 'centralus')
-  workbook_location=$(prompt_value 'Workbook location' 'centralus')
-  publisher_email=$(prompt_value 'Publisher email' "$(jq -r '.publisherEmail // empty' <<< "$CONFIG")")
+  resource_group=$(prompt_value 'Resource group name' "$(setup_default "$(jq -r '.resourceGroup // empty' <<< "$CONFIG")" RG)")
+  foundry_resource_group=$(prompt_value 'Foundry resource group name' "$(setup_default "$(jq -r '.foundryResourceGroup // empty' <<< "$CONFIG")" FOUNDRY_RG "$resource_group")")
+  apim_name=$(prompt_value 'APIM name' "$(setup_default "$(jq -r '.apimName // empty' <<< "$CONFIG")" APIM)")
+  apim_location=$(prompt_value 'APIM location' "$(setup_default "$(jq -r '.apimLocation // empty' <<< "$CONFIG")" REGION centralus)")
+  workspace_location=$(prompt_value 'Workspace location' "$(setup_default "$(jq -r '.workspaceLocation // empty' <<< "$CONFIG")" REGION "$apim_location")")
+  workbook_location=$(prompt_value 'Workbook location' "$(setup_default "$(jq -r '.workbookLocation // empty' <<< "$CONFIG")" REGION "$apim_location")")
+  local signed_in=''
+  signed_in=$(az account show --query user.name -o tsv --only-show-errors 2>/dev/null || true)
+  [[ "$signed_in" == *@* && "$signed_in" != *'#EXT#'* ]] || signed_in=''
+  publisher_email=$(prompt_value 'Publisher email' "$(setup_default "$(jq -r '.publisherEmail // empty' <<< "$CONFIG")" '' "$signed_in")")
   gateway_display_name=$(prompt_value 'Enter a name for the gateway service principal' "$(jq -r --arg default "Claude Gateway - $apim_name" '.gatewayDisplayName // $default' <<< "$CONFIG")")
-  workspace_id=$(prompt_matching 'Log Analytics workspace resource ID' "$(jq -r '.workspaceResourceId // empty' <<< "$CONFIG")" \
+  workspace_id=$(prompt_matching 'Log Analytics workspace resource ID' "$(setup_default "$(jq -r '.workspaceResourceId // empty' <<< "$CONFIG")" WS_ID)" \
     "^/subscriptions/${subscription_id}/resourceGroups/[^/]+/providers/Microsoft\.OperationalInsights/workspaces/[^/]+$" \
     "Enter the full Log Analytics workspace resource ID from subscription ${subscription_id}.")
-  foundry_name=$(prompt_value 'Foundry resource name' "$(jq -r '.foundryAccountName // empty' <<< "$CONFIG")")
-  name_prefix=$(prompt_matching 'Resource name prefix' "$(jq -r '.namePrefix // empty' <<< "$CONFIG")" \
+  foundry_name=$(prompt_value 'Foundry resource name' "$(setup_default "$(jq -r '.foundryAccountName // empty' <<< "$CONFIG")" FOUNDRY)")
+  name_prefix=$(prompt_matching 'Resource name prefix' "$(setup_default "$(jq -r '.namePrefix // empty' <<< "$CONFIG")" PREFIX)" \
     '^[a-z0-9]{3,11}$' 'Use 3-11 lowercase letters or digits.')
   CONFIG=$(jq -c --arg rg "$resource_group" --arg foundryRg "$foundry_resource_group" --arg apim "$apim_name" --arg location "$apim_location" \
     --arg workspaceLocation "$workspace_location" --arg workbookLocation "$workbook_location" --arg email "$publisher_email" \
@@ -168,6 +184,9 @@ configure_interactively() {
       .publisherEmail = $email | .gatewayDisplayName = $gatewayName | .budgetApiAudience = "" |
       .workspaceResourceId = $workspace |
       .foundryAccountName = $foundry | .namePrefix = $prefix' <<< "$CONFIG")
+  if [[ -x "$HOME/claude-venv/bin/python" && "$(jq -r '.pythonExecutable // "python3"' <<< "$CONFIG")" =~ ^python3?$ ]]; then
+    CONFIG=$(jq -c --arg p "$HOME/claude-venv/bin/python" '.pythonExecutable = $p' <<< "$CONFIG")
+  fi
 
   add_teams=$(prompt_choice 'Configure team governance now?' 'yes' 'yes/no')
   if [[ "$add_teams" == yes ]]; then
@@ -299,8 +318,15 @@ configure_desktop_client() {
   fi
   service_principals=$(azure ad sp list --filter "appId eq '$DESKTOP_CLIENT_ID'" -o json)
   if [[ $(jq 'length' <<< "$service_principals") -eq 0 ]]; then azure ad sp create --id "$DESKTOP_CLIENT_ID" -o none; fi
-  api_patch=$(jq -c --arg client "$DESKTOP_CLIENT_ID" --arg scope "$scope_id" '.api.preAuthorizedApplications =
-    (((.api.preAuthorizedApplications // []) | map(select(.appId != $client))) + [{appId: $client, delegatedPermissionIds: [$scope]}]) |
+  # Pre-authorize the Claude Desktop client and, unless options.preAuthorizeAzureCli is false, Azure CLI
+  # (used by Claude Code CLI / VS Code), so developers are not asked for admin consent.
+  local cli_pre
+  cli_pre=$(jq -r 'if .options.preAuthorizeAzureCli == false then "false" else "true" end' <<< "$CONFIG")
+  api_patch=$(jq -c --arg client "$DESKTOP_CLIENT_ID" --arg scope "$scope_id" --arg cli '04b07795-8ddb-461a-bbee-02f9e1bf7b46' --argjson withCli "$cli_pre" '
+    .appId as $self | .api.preAuthorizedApplications =
+    (((.api.preAuthorizedApplications // []) | map(select(.appId != $client and .appId != $self and (($withCli | not) or .appId != $cli))))
+      + [{appId: $client, delegatedPermissionIds: [$scope]}]
+      + (if $withCli then [{appId: $cli, delegatedPermissionIds: [$scope]}] else [] end)) |
     {api: .api}' <<< "$APP")
   azure rest --method PATCH --url "https://graph.microsoft.com/v1.0/applications/$(jq -er .id <<< "$APP")" \
     --headers Content-Type=application/json --body "$api_patch" -o none
@@ -338,6 +364,13 @@ reporting() {
     retention
   fi
   if enabled grafana; then
+    if [[ -z "$(jq -r '.grafanaAdminPrincipalId // empty' <<< "$CONFIG")" ]]; then
+      local grafana_admin
+      grafana_admin=$(azure ad signed-in-user show --query id -o tsv)
+      [[ -n "$grafana_admin" ]] || { echo 'grafanaAdminPrincipalId is empty and the signed-in user could not be read; set it to the Grafana admin user object ID.' >&2; exit 1; }
+      CONFIG=$(jq --arg id "$grafana_admin" '.grafanaAdminPrincipalId = $id' <<< "$CONFIG")
+      printf 'Grafana admin: signed-in user (%s).\n' "$grafana_admin" >&2
+    fi
     deploy 11-grafana "$RESOURCE_GROUP" infra/11-grafana.bicep "grafanaName=$(value .grafanaName)" "location=$(value .grafanaLocation)" \
       "logAnalyticsWorkspaceId=$WORKSPACE_ID" "adminPrincipalId=$(value .grafanaAdminPrincipalId)" >/dev/null
     bash "$ROOT/infra/13-import-grafana-dashboard.sh" "$(value .grafanaName)" "$RESOURCE_GROUP" "$WORKSPACE_ID"

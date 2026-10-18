@@ -66,9 +66,9 @@ $config |
     [.options.registerProviders, .options.checkEp1Quota, .options.pricesReviewed, .options.workbook,
      .options.summaryRule, .options.grafana, .options.reconcile, .options.smokeTest] | all(.[]; type == "boolean");
     .options | tostring),
-  rule("With Grafana on, grafanaName, grafanaLocation and a GUID grafanaAdminPrincipalId are required";
+  rule("With Grafana on, grafanaName and grafanaLocation are required, and grafanaAdminPrincipalId must be empty (signed-in user) or a GUID";
     if .options.grafana then (.grafanaName | type == "string" and length > 0) and
-      (.grafanaLocation | type == "string" and length > 0) and (.grafanaAdminPrincipalId | guid) else true end;
+      (.grafanaLocation | type == "string" and length > 0) and ((.grafanaAdminPrincipalId // "") == "" or (.grafanaAdminPrincipalId | guid)) else true end;
     {grafanaName, grafanaLocation, grafanaAdminPrincipalId} | tostring),
   rule("Team governance mode must be off, observe or enforce";
     if .teamGovernance == null then true else (.teamGovernance.mode as $m | ($m == "off" or $m == "observe" or $m == "enforce")) end;

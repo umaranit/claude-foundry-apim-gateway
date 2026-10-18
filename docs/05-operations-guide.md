@@ -11,11 +11,14 @@ Day-2 tasks for administrators after the deployment. Commands are shown for Linu
 ### Allow Azure CLI to request gateway tokens
 Claude Code CLI and the VS Code extension get their gateway token through Azure CLI. In tenants that block user consent, developers otherwise see **"Need admin approval – Microsoft Azure CLI"**. Choose one of these options:
 
+The setup does this automatically (option `preAuthorizeAzureCli`, default on): it adds Azure CLI as an authorized client of the gateway API on every full run and export. Use the steps below only to check it, to repair it, or if you turned the option off.
+
 **Option A: authorized client application (set by the gateway app owner)**
 1. Azure portal > **Microsoft Entra ID** > **App registrations** > **All applications** > the gateway app ("Claude Gateway - &lt;APIM name&gt;").
 2. **Expose an API** > **Authorized client applications** > **Add a client application**.
-3. Client ID: `04b07795-8ddb-461a-bbee-02f9e1bf7b46` (Microsoft Azure CLI; the same ID in every tenant).
+3. Client ID: `04b07795-8ddb-461a-bbee-02f9e1bf7b46` (Microsoft Azure CLI; the same ID in every tenant). Do not enter the gateway app ID or the Claude Desktop app ID.
 4. Select the `access_as_user` scope > **Add application**.
+5. Check: `az ad app show --id <gateway-app-id> --query "api.preAuthorizedApplications[].appId" -o tsv` must list `04b07795-8ddb-461a-bbee-02f9e1bf7b46`. If "Need admin approval" still appears, this ID is missing or was added to the wrong app.
 
 **Option B: admin consent.** An Entra administrator grants tenant-wide consent for Azure CLI to call the gateway API.
 
@@ -163,7 +166,7 @@ Reading the numbers:
 **Changing a workbook:** you can select **Edit** in the portal and **Save**, but the next setup run overwrites the workbook. For lasting changes, use **Edit > Advanced editor**, copy the JSON into the matching file in `infra/`, and commit it; the next setup run then deploys your version.
 
 ### Add Grafana later
-1. In `admin/setup.local.json`, set `options.grafana` to `true` and fill `grafanaName`, `grafanaLocation` and `grafanaAdminPrincipalId` (the admin's **user object ID in this tenant**; an app ID or app object ID does not work).
+1. In `admin/setup.local.json`, set `options.grafana` to `true` and fill `grafanaName` and `grafanaLocation`. Leave `grafanaAdminPrincipalId` empty to make the signed-in user the Grafana admin, or set the admin's **user object ID in this tenant** (an app ID or app object ID does not work).
 2. Run only the reporting stage:
 ```bash
 az extension add -n amg

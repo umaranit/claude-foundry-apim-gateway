@@ -121,6 +121,7 @@
     "summaryRule": false,
     "grafana": false,
     "reconcile": false,
-    "smokeTest": false
+    "smokeTest": false,
+    "preAuthorizeAzureCli": true
   }
 }

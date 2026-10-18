@@ -43,15 +43,18 @@ sudo apt update && sudo apt install -y azure-functions-core-tools-4
 **Why:** the repository contains the scripts, the Azure templates and the Function code. The `logs` folder keeps a record of the deployment. A Python virtual environment keeps the packages the scripts need separate from the system Python.
 
 Clone **inside Linux**. Do not copy `.sh` files from a Windows folder; Windows line endings break them.
+Use the latest **release** (tested version) rather than the newest changes: check **Releases** on the repository page and use that tag in `--branch` (this guide was written for `v1.0.2`). `git clone` creates a folder named `claude-foundry-apim-gateway` in your home folder; if a folder with that name already exists there, clone into another folder.
 ```bash
 cd ~
-git clone https://github.com/umaranit/claude-foundry-apim-gateway.git
-cd claude-foundry-apim-gateway
+git clone --branch v1.0.2 https://github.com/umaranit/claude-foundry-apim-gateway.git
+cd claude-foundry-apim-gateway          # the folder git clone created
 chmod +x admin/*.sh && mkdir -p logs
 python3 -m venv ~/claude-venv
 source ~/claude-venv/bin/activate
 pip install azure-identity azure-monitor-ingestion requests redis
+echo "$HOME/claude-venv/bin/python"
 ```
+The last line shows the **Python path**; step C3 saves it in the configuration. Run all later commands from the repository folder.
 
 ---
 
@@ -60,16 +63,17 @@ pip install azure-identity azure-monitor-ingestion requests redis
 ### B1. Set your values and sign in
 **Why:** every later command runs against this tenant and subscription. Setting the values once here means you do not edit placeholders in each command, which avoids typing mistakes.
 
-Fill in your values (keep the quotes), then run the block:
+Fill in your values (keep the quotes), then run the block. `export` lets the setup script offer them as default answers in preflight (C2).
 ```bash
-TENANT="<tenant-id>"
-SUB="<subscription-id>"
-REGION="<region>"                    # for example centralus
-RG="<resource-group>"                # gateway resource group
-WS="<workspace-name>"                # Log Analytics workspace
-FOUNDRY_RG="<foundry-resource-group>"
-FOUNDRY="<foundry-resource-name>"
-APIM="<apim-name>"                   # globally unique
+export TENANT="<tenant-id>"
+export SUB="<subscription-id>"
+export REGION="<region>"                    # for example centralus
+export RG="<resource-group>"                # gateway resource group
+export WS="<workspace-name>"                # Log Analytics workspace
+export FOUNDRY_RG="<foundry-resource-group>"
+export FOUNDRY="<foundry-resource-name>"
+export APIM="<apim-name>"                   # globally unique
+export PREFIX="<prefix>"                    # 3-11 lowercase letters or digits
 
 az login --tenant "$TENANT"
 az account set --subscription "$SUB"
@@ -84,12 +88,12 @@ If Conditional Access requires a managed device, use the browser sign-in (not `-
 Skip this step if they already exist (checklist items 5 and 6).
 ```bash
 az group create -n "$RG" -l "$REGION" -o table
-WS_ID=$(az monitor log-analytics workspace create -g "$RG" -n "$WS" -l "$REGION" --query id -o tsv)
+export WS_ID=$(az monitor log-analytics workspace create -g "$RG" -n "$WS" -l "$REGION" --query id -o tsv)
 echo "$WS_ID"
 ```
 The last line shows the **workspace resource ID**. Preflight (C2) asks for it. If the workspace already exists:
 ```bash
-WS_ID=$(az monitor log-analytics workspace show -g "$RG" -n "$WS" --query id -o tsv); echo "$WS_ID"
+export WS_ID=$(az monitor log-analytics workspace show -g "$RG" -n "$WS" --query id -o tsv); echo "$WS_ID"
 ```
 Use the same region for the workspace and the gateway unless your organization requires otherwise.
 
@@ -144,22 +148,22 @@ The first command shows the plan only. The second creates the app; its output li
 
 | Question | Answer |
 |---|---|
-| Subscription ID, Tenant ID | The values of `$SUB` and `$TENANT` from B1 |
+| Subscription ID, Tenant ID | Press Enter (from B1, or your current Azure CLI sign-in) |
 | Publisher name | Press Enter, or your team name |
-| Resource group name | `$RG` |
-| Foundry resource group name | `$FOUNDRY_RG` |
-| APIM name | `$APIM` |
-| APIM location | `$REGION` (also used for the budget platform) |
-| Workspace location | The workspace's region (`$REGION` if created in B2) |
-| Workbook location | `$REGION` |
-| Publisher email | Admin email |
+| Resource group name | Press Enter (`$RG` from B1) |
+| Foundry resource group name | Press Enter (`$FOUNDRY_RG`) |
+| APIM name | Press Enter (`$APIM`) |
+| APIM location | Press Enter (`$REGION`; also used for the budget platform) |
+| Workspace location | Press Enter (`$REGION`), or the existing workspace's region |
+| Workbook location | Press Enter (`$REGION`) |
+| Publisher email | Press Enter (your sign-in), or the admin team's email |
 | Gateway service principal name | Press Enter: the default is the C1 name, "Claude Gateway - `$APIM`" |
-| Log Analytics workspace resource ID | The workspace resource ID shown in B2 |
-| Foundry resource name | `$FOUNDRY` |
-| Resource name prefix | 3–11 lowercase letters or digits (used in the names of the budget platform resources) |
+| Log Analytics workspace resource ID | Press Enter (`$WS_ID` from B2) |
+| Foundry resource name | Press Enter (`$FOUNDRY`) |
+| Resource name prefix | Press Enter (`$PREFIX`; 3–11 lowercase letters or digits, used in the names of the budget platform resources) |
 | Configure team governance now? | `yes`, then the team details from the checklist. Each person may be in only one team. The team governance mode is `enforce` by default (see C3 to change it). |
 
-Team member sign-in names are entered comma-separated, without spaces.
+Check each default in `[...]` before pressing Enter; type a value to replace it. Team member sign-in names are entered comma-separated, without spaces.
 
 Expected result:
 ```
@@ -188,20 +192,61 @@ jq '.teamGovernance.mode="observe"' admin/setup.local.json > /tmp/setup.json && 
 ```
 In `enforce` mode every user must be in exactly one team, and each team can use only its allowed models.
 
-**3. Only if you want Grafana** (skip this otherwise). Replace the two `<...>` values first; the admin object ID is the admin's **user object ID in this tenant**:
+**3. Only if you want Grafana** (skip this otherwise). Azure Managed Grafana adds dashboards on top of the workbooks; it is billed per hour plus per active user.
 ```bash
-jq --arg n "<prefix>-grafana" --arg l "$REGION" --arg a "<admin-user-object-id>" \
-  '.options.grafana=true | .grafanaName=$n | .grafanaLocation=$l | .grafanaAdminPrincipalId=$a' \
+az extension add -n amg
+GRAFANA_NAME="$(jq -r .namePrefix admin/setup.local.json)-grafana"
+jq --arg n "$GRAFANA_NAME" --arg l "$REGION" '.options.grafana=true | .grafanaName=$n | .grafanaLocation=$l' \
   admin/setup.local.json > /tmp/setup.json && mv /tmp/setup.json admin/setup.local.json
 ```
+- **Grafana name:** your prefix plus `-grafana` (2–23 letters, digits or hyphens; start with a letter).
+- **Grafana admin:** left empty, the setup makes **the signed-in user** (you) the Grafana admin. To choose someone else, set their **user object ID in this tenant** (Microsoft Entra ID > Users > person > Overview > Object ID; not an app ID or tenant ID):
+  ```bash
+  ADMIN_OID=$(az ad user show --id <sign-in-name> --query id -o tsv)
+  jq --arg a "$ADMIN_OID" '.grafanaAdminPrincipalId=$a' admin/setup.local.json > /tmp/setup.json && mv /tmp/setup.json admin/setup.local.json
+  ```
 
-**4. Check the settings and validate** (required):
+**4. Check the settings and validate** (required). Three short checks. Nothing is changed by them.
+
+**4a. The deployment settings.** Run:
 ```bash
 jq '{resourceGroup, apimName, namePrefix, workspaceResourceId, gatewayAudience, pythonExecutable, mode: .teamGovernance.mode, grafana: .options.grafana, pricesReviewed: .options.pricesReviewed}' admin/setup.local.json
-jq '.teamGovernance.teams[] | {id, profile, defaultUserTier, allowedModels, members}' admin/setup.local.json
-jq -e -f admin/validate-config.jq admin/setup.local.json > /dev/null && echo "Config OK"
 ```
-Check that the resource group and the workspace ID belong to this deployment, the mode is what you want, `grafana` is `false` unless you chose step 3, `pricesReviewed` is `true`, and the result is `Config OK`. If you ran step 2 or 3 by mistake, run them again with the values you want (for example `"enforce"`, or `.options.grafana=false`).
+Compare each line with what you expect:
+
+| Setting | It should be | If it is wrong |
+|---|---|---|
+| `resourceGroup` | The gateway resource group from B1/B2 | Run preflight (C2) again, or correct it in the file |
+| `apimName` | The APIM name you chose | As above |
+| `namePrefix` | Your 3–11 character prefix | As above |
+| `workspaceResourceId` | Contains **your** subscription, resource group and workspace name (from B2). A common mistake is an ID copied from another deployment. | Correct it (see "If preflight stops with an error" in C2) |
+| `gatewayAudience` | The `gatewayAudience` (app ID) printed in C1 | Check that you pressed Enter at the gateway service principal question in C2 |
+| `pythonExecutable` | The Python from A2 (or `python`) | Correct it in the file |
+| `mode` | `enforce` (default), or `observe` if you chose part 2 | Run part 2 again with the value you want |
+| `grafana` | `false`, or `true` if you chose part 3 | Set `.options.grafana=false` with the same command pattern as part 2 |
+| `pricesReviewed` | `true` | Run part 1 |
+
+**4b. The teams.** Run:
+```bash
+jq '.teamGovernance.teams[] | {id, profile, defaultUserTier, allowedModels, members}' admin/setup.local.json
+```
+For each team, check: the members are the right people (sign-in names), **no person appears in two teams**, the profile (`regular`/`power`) and default tier (`pro`/`basic`/`lite`) are what the business owner asked for, and `allowedModels` lists the models the team may use. In `enforce` mode, anyone not listed in a team cannot use the gateway.
+
+**4c. The automatic check.** Run:
+```bash
+jq -e -f admin/validate-config.jq admin/setup.local.json > /dev/null && echo "Config OK" || echo "Config INVALID"
+```
+- `Config OK`: continue to the deployment.
+- `Config INVALID`: list the rule that failed (rules with `"ok": false`), fix it, and run 4c again:
+  ```bash
+  jq -f admin/validate-config-check.jq admin/setup.local.json
+  ```
+
+**Decisions to confirm with the business owner before deploying.** These affect users and cost:
+1. **Model prices.** Spend is calculated from the prices in `snippets/15-load-pricing.py`. If you have negotiated prices, update the file first. To view them: `grep -n -A 20 "PRICES" snippets/15-load-pricing.py`
+2. **Budgets and limits.** Monthly user-tier budgets and team budgets. Change them now in the file, or later (operations guide, section 3). To view them: `jq '{userTiers: .tiersConfig, teamProfiles: .teamGovernance.profiles}' admin/setup.local.json`
+3. **Budgets are guardrails, not exact bills.** Cache-write tokens are not counted, users can go slightly over a limit before it applies, and requests are allowed if the budget service is unavailable. Reconcile with Azure Cost Management.
+4. **`enforce` or `observe`.** `enforce` blocks from the first request; `observe` only records, for a trial period.
 
 ### C4. Deploy (45–60 minutes)
 **Why:** creates everything in the right order, because later parts need outputs from earlier ones:
@@ -246,10 +291,16 @@ az ad app show --id "$(jq -r .gatewayAudience admin/setup.local.json)" --query "
 - The governance check ends with `Team governance reconciliation complete`.
 - The roles include `Claude.User`, the tier roles and the team and profile roles.
 
-### D2. Allow developers to sign in with Azure CLI
-**Why:** Claude Code (CLI and VS Code) gets its gateway token through Azure CLI. Many organizations do not let users approve this themselves ("Need admin approval"). Pre-approving Azure CLI once avoids that for every developer.
+### D2. Check that developers can sign in with Azure CLI
+**Why:** Claude Code (CLI and VS Code) gets its gateway token through Azure CLI. Many organizations do not let users approve this themselves ("Need admin approval"). The setup therefore pre-authorizes Azure CLI on the gateway API, the same way it does for Claude Desktop.
 
-See the operations guide, "Allow Azure CLI to request gateway tokens". Skip this if an Entra admin has granted consent instead.
+Check it:
+```bash
+az ad app show --id "$(jq -r .gatewayAudience admin/setup.local.json)" --query "api.preAuthorizedApplications[].appId" -o tsv
+```
+The list must contain `04b07795-8ddb-461a-bbee-02f9e1bf7b46` (Microsoft Azure CLI, the same ID in every tenant) and the Claude Desktop client ID. If Azure CLI is missing, add it by hand: operations guide, "Allow Azure CLI to request gateway tokens".
+
+If your organization prefers admin consent instead, set `options.preAuthorizeAzureCli` to `false` in C3 before deploying, and have an Entra admin grant consent.
 
 ### D3. End-to-end test as a user
 **Why:** proves the whole path works: sign-in, role check, API Management, budget check and Foundry. The first test call has no token and must be rejected (401); the second, with your token, must succeed (200).
