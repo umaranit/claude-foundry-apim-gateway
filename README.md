@@ -74,10 +74,9 @@ Never put passwords, API keys, tokens or client secrets in any configuration fil
 Do not commit environment-specific files: `admin/setup.local.json`, `admin/setup.rejected.json`,
 `developer/claude-client-configuration.json` and `logs/` (they are listed in `.gitignore`).
 
-## Credits and license
+## License and acknowledgements
 
-Based on the *Claude on Azure* guide and code ([monuminu.github.io/claude-on-azure](https://monuminu.github.io/claude-on-azure/))
-and [sombaner/claude-on-azure-sombaner](https://github.com/sombaner/claude-on-azure-sombaner).
-This version adds deployment and operations guides, Windows PowerShell fixes and configuration-validation fixes.
+Built on the *Claude on Azure* guide and code ([monuminu.github.io/claude-on-azure](https://monuminu.github.io/claude-on-azure/)).
+Changes are recorded in the Git history.
 
 Content is licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); code is licensed MIT. See [LICENSE](LICENSE).
