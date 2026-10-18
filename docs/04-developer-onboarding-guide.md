@@ -110,6 +110,8 @@ To copy the scopes exactly, without typing:
 
 Claude Desktop may show notes that some setting names (for example `interactive` and `inferenceGatewayOidc`) are deprecated. They still work.
 
+**Model list and your team.** If your organization limits models per team, add only the models your team may use, and put one of them **first** (the first entry is Desktop's default). A model your team may not use returns *"403 The requested Claude model is not enabled for your team"*. Ask your administrator which models your team has.
+
 ### Step 3: Test
 Select **Test connection** and sign in in the browser. Expected: `Connected. You can close this tab.` Then start a chat.
 
@@ -129,6 +131,7 @@ Gateway denials include the header `x-claude-denied-by`, which names the reason.
 | 401 | No `Claude.User` role, or wrong token type | Ask your administrator to check your team membership (new roles can take a few minutes); in Desktop select **Access token** |
 | 403 `identity` | You are not in exactly one Claude team | Ask your administrator to add you to one team (and remove you from any other); then sign in again |
 | 403 `team-model-policy` | The model is not allowed for your team | Use an allowed model, or ask your administrator |
+| Desktop: "Failed to authenticate. API Error: 403 The requested Claude model is not enabled for your team" | Sign-in worked, but the selected model is not allowed for your team (despite the wording, this is not a sign-in problem) | Pick an allowed model at the bottom of the message box, and put an allowed model first in **Model list** |
 | 403 `user-budget` or `team-budget` | Your or your team's monthly budget is used up | Ask your administrator |
 | 403 `admin` | Your access is suspended | Ask your administrator |
 | 429 (`user-token-limit` or `team-token-limit`) | Rate or token limit reached | Wait and retry, or ask your administrator |

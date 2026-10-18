@@ -146,9 +146,21 @@ For example after changing model deployments:
 If it asks for model deployment names, enter the **real** deployment names from Foundry (for example `claude-sonnet-5-apim`), not the suggested defaults. Send the new `developer/claude-client-configuration.json` to developers.
 
 ### Monitoring
-Open the Log Analytics workspace > **Workbooks**:
-- **Claude team governance**: spend against the team budget, and cost per developer within each team.
-- The usage workbook deployed by `09-workbook`.
+The setup deploys two Azure Monitor workbooks. Open the Log Analytics workspace > **Workbooks**:
+
+| Workbook | Tabs and content | Defined in |
+|---|---|---|
+| **Claude usage — gateway view** | **Overview** (requests, tokens, developers, success rate), **People** (top developers by tokens, active developers per day), **Models & cost** (tokens and estimated cost per model), **Health** (status codes, denials, latency) | `infra/08-claude-usage-workbook.json`, deployed by `infra/09-workbook.bicep` when `options.workbook` is `true` |
+| **Claude team governance** | Spend against each team's budget, and cost per developer within each team | `infra/23-team-governance-workbook.json`, deployed with `infra/22-team-governance.bicep` |
+
+How it works: the gateway policy adds the caller's identity (`x-caller-oid`, `x-caller-upn`) and team to each request in the API Management logs, and the workbook queries group those logs by developer, team, model and status. Data appears 5–15 minutes after requests.
+
+Reading the numbers:
+- **Success rate** counts every request, including deliberate denials (401 without sign-in, 403 for blocked models or budgets). A low rate during testing is normal.
+- **Estimated cost** uses the prices loaded from `snippets/15-load-pricing.py` and excludes cache writes (see the README, Known limitations). Reconcile with Azure Cost Management.
+- Rows showing `anonymous` or a GUID are requests without a signed-in user (for example the 401 smoke test) or from before the policy was deployed.
+
+**Changing a workbook:** you can select **Edit** in the portal and **Save**, but the next setup run overwrites the workbook. For lasting changes, use **Edit > Advanced editor**, copy the JSON into the matching file in `infra/`, and commit it; the next setup run then deploys your version.
 
 ### Add Grafana later
 1. In `admin/setup.local.json`, set `options.grafana` to `true` and fill `grafanaName`, `grafanaLocation` and `grafanaAdminPrincipalId` (the admin's **user object ID in this tenant**; an app ID or app object ID does not work).
@@ -167,20 +179,58 @@ Some dashboards use the hourly summary table; to create it, also set `options.su
 
 ## 5. Clean-up
 
-1. Delete the gateway resource group (APIM, Functions, Redis, Cosmos DB and Grafana are billed per hour):
+> **Delete only what this deployment created.** Microsoft Entra ID is shared by the whole organization, and other teams may have apps or groups with similar names (for example "Claude Desktop - ..." or "Claude Team - ..."). Never delete by a name pattern; use the exact IDs and names below, and check each item before deleting it.
+
+### 5.1 Collect the exact IDs (read-only)
+From the repository folder used for the deployment:
+```powershell
+$cfg = Get-Content -Raw admin\setup.local.json | ConvertFrom-Json
+"Resource group : $($cfg.resourceGroup)"
+"Gateway app    : $($cfg.gatewayAudience)"
+"Budget API app : $($cfg.budgetApiAudience)"
+"Desktop app    : " + (Get-Content -Raw developer\claude-client-configuration.json | ConvertFrom-Json).gatewaySso.clientId
+$cfg.teamGovernance.teams | ForEach-Object { "Team group     : $($_.groupDisplayName)" }
+```
+```bash
+jq -r '"Resource group : \(.resourceGroup)\nGateway app    : \(.gatewayAudience)\nBudget API app : \(.budgetApiAudience)"' admin/setup.local.json
+jq -r '"Desktop app    : \(.gatewaySso.clientId)"' developer/claude-client-configuration.json
+jq -r '.teamGovernance.teams[] | "Team group     : \(.groupDisplayName)"' admin/setup.local.json
+```
+If `budgetApiAudience` is empty, find the app named exactly "Claude Budget API - &lt;prefix&gt;" under **App registrations > Owned applications**.
+
+Check each app before deleting it:
+```bash
+az ad app show --id <app-id> --query "{name:displayName, appId:appId}" -o table
+```
+Check each team group and its members; delete it only if the members are the ones from your configuration and only one group has that name:
+```bash
+az ad group list --display-name "<exact group name>" --query "[].{name:displayName, id:id}" -o table
+az ad group member list --group <group-id> --query "[].userPrincipalName" -o tsv
+```
+
+### 5.2 Delete
+1. **The gateway resource group** (API Management, Function Apps, Redis, Cosmos DB, Event Hub, storage and, if it is there, the Log Analytics workspace with its usage data and workbooks):
    ```bash
    az group delete -n <resource-group> --yes --no-wait
    ```
-2. If the Log Analytics workspace is in a **different** resource group, also delete the pricing data collection rule (`dcr-claudeprice-...`) and the workbooks there (and the workspace, if it was created only for the gateway). If the workspace is in the gateway resource group, step 1 removes it, including its usage data.
-3. Delete the Entra objects: the gateway app, "Claude Desktop - &lt;APIM name&gt;", "Claude Budget API - &lt;prefix&gt;", and the "Claude Team - ..." groups:
+   If the Log Analytics workspace is in a **different** resource group, also delete the pricing data collection rule (`dcr-claudeprice-...`) and the workbooks there, and the workspace if it was created only for the gateway.
+2. **The three apps**, by their exact IDs from 5.1:
    ```bash
-   az ad app delete --id <app-id>
-   az ad group delete --group "Claude Team - <team name>"
+   az ad app delete --id <gateway-app-id>
+   az ad app delete --id <desktop-app-id>
+   az ad app delete --id <budget-api-app-id>
    ```
-4. A deleted API Management instance is kept for 48 hours. To reuse the same name sooner:
+3. **The team groups**, by their IDs from 5.1, after checking the members:
+   ```bash
+   az ad group delete --group <group-id>
+   ```
+   Or in the portal: **Microsoft Entra ID > App registrations > Owned applications** (shows only apps you own) and **Groups > All groups**; open each item, check it, then **Delete**.
+4. **Leave the Microsoft Foundry resource and its model deployments**, unless they were created only for this gateway.
+5. A deleted API Management instance keeps its name reserved for 48 hours. To reuse the same name sooner:
    ```bash
    az apim deletedservice purge --service-name <apim-name> --location <region>
    ```
+6. On the deployment machine, delete `admin/setup.local.json`, `admin/setup.rejected.json`, `developer/claude-client-configuration.json` and `logs/`; they contain environment details.
 
 ---
 
